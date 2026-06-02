@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -71,7 +72,9 @@ def _day_key(ts_ms: int) -> str:
 
 cfg = AppConfig()
 engine = Engine(cfg)
-_state: dict = {"live": False, "player": False, "last_rec": None}
+_server_started = time.time()       # момент запуска процесса (uptime сервера)
+_state: dict = {"live": False, "player": False, "last_rec": None,
+                "session_started": None}   # старт текущей торговой сессии (обнуляется сбросом)
 _history: list[dict] = []           # срез индикаторов по обработанным барам (для графика)
 _player_rows: list[IndicatorRow] = []
 _player_idx = 0
@@ -86,6 +89,7 @@ def _reset_engine() -> None:
     _player_idx = 0
     _last_live_ts = 0
     _state["last_rec"] = None
+    _state["session_started"] = time.time()   # старт новой торговой сессии
 
 
 def _warmup_limit() -> int:
@@ -411,6 +415,9 @@ def state():
         "player": _state["player"],
         "auto_approve": cfg.auto_approve,     # режим авто-входа
         "preset": _current_preset(),          # активный пресет параметров
+        "session_started": _state["session_started"],  # unix-сек старта торговой сессии
+        "server_started": _server_started,    # unix-сек запуска сервера (uptime)
+        "now": time.time(),                   # серверное «сейчас» (для расчёта длительности на клиенте)
         "pair": {                             # текущая пара (короткие подписи ног)
             "a": _sym_short(cfg.strategy.symbol_a),
             "b": _sym_short(cfg.strategy.symbol_b),

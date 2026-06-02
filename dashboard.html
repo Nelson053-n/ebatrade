@@ -218,6 +218,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <div class="pill">данные: MEXC · только чтение</div>
     <div class="pill badge-paper">виртуальная биржа</div>
     <div class="pill"><span class="dot"></span> поток активен</div>
+    <div class="pill" id="pill-session" title="время работы текущей торговой сессии">сессия: —</div>
     <button class="theme-toggle" id="btnStrat"><span class="ic">ⓘ</span> о стратегии</button>
     <button class="theme-toggle" id="themeToggle"><span class="ic">◐</span> <span id="themeLabel">тёмная</span></button>
   </header>
@@ -346,6 +347,21 @@ tr:hover td{background:rgba(255,255,255,.015)}
   </div>
 
   <!-- О СТРАТЕГИИ (модальное окно) -->
+  <!-- ПОДТВЕРЖДЕНИЕ СБРОСА -->
+  <div class="modal-overlay" id="resetModal">
+   <div class="modal" style="max-width:440px">
+    <div class="modal-head"><h2>Сбросить сессию?</h2><button class="modal-x" id="resetClose">✕</button></div>
+    <p style="font-size:13px;color:var(--ink-dim);line-height:1.6;margin-bottom:18px">
+      Текущая торговая сессия будет обнулена: журнал сделок, открытая позиция, метрики и
+      время работы сессии сбросятся. Это действие необратимо.
+    </p>
+    <div class="actions" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <button class="reject" id="resetConfirm">✓ сбросить</button>
+      <button class="approve" id="resetCancel">отмена</button>
+    </div>
+   </div>
+  </div>
+
   <div class="modal-overlay" id="stratModal">
    <div class="modal">
     <div class="modal-head"><h2>О стратегии <em>парный спред · mean-reversion</em></h2><button class="modal-x" id="stratClose">✕</button></div>
@@ -621,7 +637,9 @@ function render(s){
 async function poll(){
   try{
     snap = await api('/state');
+    if(snap.now) _clockSkew = snap.now - Date.now()/1000;   // синхр. часов с сервером
     render(snap);
+    tickSession();
   }catch(e){ /* сервер мог перезапускаться — тихо ждём следующего тика */ }
 }
 
@@ -636,7 +654,13 @@ $('btnPause').onclick=async e=>{
   e.target.textContent = running?'▶ запустить поток':'❚❚ пауза потока';
   poll();
 };
-$('btnReset').onclick=async()=>{
+// кнопка сброса открывает модалку подтверждения (чтобы не сбросить случайно)
+$('btnReset').onclick=()=>$('resetModal').classList.add('open');
+$('resetClose').onclick=()=>$('resetModal').classList.remove('open');
+$('resetCancel').onclick=()=>$('resetModal').classList.remove('open');
+$('resetModal').onclick=e=>{ if(e.target===$('resetModal')) $('resetModal').classList.remove('open'); };
+$('resetConfirm').onclick=async()=>{
+  $('resetModal').classList.remove('open');
   // сброс в текущем источнике: live → перезапуск live; синтетика → reset+стоп
   try{
     if(snap && snap.live){ await api('/live/stop','POST'); await api('/live/start','POST'); }
@@ -844,7 +868,7 @@ $('btnApply').onclick=async()=>{
 $('btnStrat').onclick=()=>$('stratModal').classList.add('open');
 $('stratClose').onclick=()=>$('stratModal').classList.remove('open');
 $('stratModal').onclick=e=>{ if(e.target===$('stratModal')) $('stratModal').classList.remove('open'); };
-addEventListener('keydown',e=>{ if(e.key==='Escape') $('stratModal').classList.remove('open'); });
+addEventListener('keydown',e=>{ if(e.key==='Escape'){ $('stratModal').classList.remove('open'); $('resetModal').classList.remove('open'); } });
 
 /* ===== ПЕРЕКЛЮЧАТЕЛЬ ТЕМЫ ===== */
 const root=document.documentElement;
@@ -854,6 +878,22 @@ $('themeToggle').onclick=()=>{
   $('themeLabel').textContent = light?'светлая':'тёмная';
   if(snap) draw(snap.history);
 };
+
+/* ===== ТАЙМЕР СЕССИИ (живой счётчик в шапке) ===== */
+let _clockSkew=0;   // серверное now − клиентское (сек), чтобы не зависеть от часов клиента
+function fmtDur(sec){
+  sec=Math.max(0,Math.floor(sec));
+  const d=Math.floor(sec/86400), h=Math.floor(sec%86400/3600), m=Math.floor(sec%3600/60), s=sec%60;
+  const p=n=>String(n).padStart(2,'0');
+  return (d>0? d+'д ':'')+p(h)+':'+p(m)+':'+p(s);
+}
+function tickSession(){
+  const el=$('pill-session');
+  if(!snap || !snap.session_started){ el.textContent='сессия: —'; return; }
+  const nowC=Date.now()/1000 + _clockSkew;
+  el.textContent='сессия: '+fmtDur(nowC - snap.session_started);
+}
+setInterval(tickSession, 1000);
 
 /* ===== СТАРТ ===== */
 resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
