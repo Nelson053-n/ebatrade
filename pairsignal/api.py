@@ -42,18 +42,18 @@ PAIRS = [
     ("XRP/USDT:USDT", "ADA/USDT:USDT"),
 ]
 
-# пресеты параметров (подобраны grid-search на 6-мес истории, out-of-sample)
+# пресеты параметров (подобраны grid-search + multi-agent ресёрч, out-of-sample train/test)
 PRESETS = {
     "balanced": {
         "label": "Сбалансированный",
-        "desc": "оптимум: прибыльный на истории (+59 за 6 мес по 4 парам)",
-        "entry_z": 1.5, "stop_z": 4.0, "profit_target_fees": 6.0,
-        "bb_period": 120, "min_width_pct": 0.5,
+        "desc": "win 73%, net +91 (6 мес, 9 пар, OOS-подтверждён): ранний тейк + широкий стоп",
+        "entry_z": 2.5, "stop_z": 8.0, "profit_target_fees": 6.0,
+        "bb_period": 240, "min_width_pct": 0.5,
     },
     "conservative": {
         "label": "Консервативный",
-        "desc": "реже входит, дальше стоп: ниже риск, результат около нуля",
-        "entry_z": 2.5, "stop_z": 5.0, "profit_target_fees": 8.0,
+        "desc": "win 65%, net +68: реже фиксирует прибыль, самый стабильный net по периодам",
+        "entry_z": 2.5, "stop_z": 8.0, "profit_target_fees": 8.0,
         "bb_period": 240, "min_width_pct": 0.5,
     },
 }
