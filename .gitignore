@@ -11,3 +11,6 @@ dist/
 
 # basic-auth хэш (не нужен — auth снят)
 infra/trade.htpasswd
+
+# деплой-конфиги с внутренними адресами (не публикуем)
+infra/
