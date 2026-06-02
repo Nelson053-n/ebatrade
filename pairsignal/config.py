@@ -17,21 +17,22 @@ class StrategyConfig(BaseModel):
     beta_window: int = 240               # окно rolling-OLS для динамической беты (log-режим)
 
     # --- индикатор (Боллинджер поверх спреда) ---
-    bb_period: int = 120                 # окно BB (оптим. на 6-мес истории, out-of-sample)
+    # пресет КОНСЕРВАТИВНЫЙ — лучше обобщается на всех 9 парах (бэктест 6 мес: +66,
+    # 6/9 прибыльных пар), тогда как «сбалансированный» переобучился на 4 парах.
+    bb_period: int = 240
     bb_k: float = 2.0
 
     # --- пороги сигналов (в единицах z-score) ---
-    # значения подобраны grid-search на 6 мес реальных данных (train/test split, OOS-прибыль)
-    entry_z: float = 1.5                 # вход при |z| >= entry_z
+    entry_z: float = 2.5                 # вход при |z| >= entry_z
     exit_z: float = 0.2                  # (не используется при profit-target выходе)
-    stop_z: float = 4.0                  # стоп при |z| >= stop_z (движение против)
+    stop_z: float = 5.0                  # стоп при |z| >= stop_z (движение против)
     min_width_pct: float = 0.5           # анти-флэт фильтр: полуширина канала, %
     max_bars_in_trade: int = 576         # тайм-стоп
     allow_short_spread: bool = True      # разрешить и обратную сторону
     # выход по ЦЕЛИ ПРИБЫЛИ: закрываем по возврату, когда нереализованный gross достиг
     # profit_target_fees × (round-trip комиссий). Гарантирует gross ≥ 0 на выходе,
     # устраняя «z вернулся, но P&L < 0» из-за дрейфа β и скользящей средней.
-    profit_target_fees: float = 6.0      # цель = 6× round-trip комиссий (оптим.)
+    profit_target_fees: float = 8.0      # цель = 8× round-trip комиссий
 
 
 class PaperConfig(BaseModel):
