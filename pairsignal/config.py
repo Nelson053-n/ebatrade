@@ -22,11 +22,15 @@ class StrategyConfig(BaseModel):
 
     # --- пороги сигналов (в единицах z-score) ---
     entry_z: float = 2.0                 # вход при |z| >= entry_z
-    exit_z: float = 0.2                  # (устар.) выход по z; теперь выход по возврату к средней
+    exit_z: float = 0.2                  # (не используется при profit-target выходе)
     stop_z: float = 3.5                  # стоп при |z| >= stop_z (движение против)
     min_width_pct: float = 2.0           # анти-флэт фильтр: полуширина канала, %
     max_bars_in_trade: int = 576         # тайм-стоп (576 * 5m ≈ 48 ч)
     allow_short_spread: bool = True      # разрешить и обратную сторону
+    # выход по ЦЕЛИ ПРИБЫЛИ: закрываем по возврату, когда нереализованный gross достиг
+    # profit_target_fees × (round-trip комиссий). Гарантирует gross ≥ 0 на выходе,
+    # устраняя «z вернулся, но P&L < 0» из-за дрейфа β и скользящей средней.
+    profit_target_fees: float = 3.0      # цель = 3× round-trip комиссий
 
 
 class PaperConfig(BaseModel):

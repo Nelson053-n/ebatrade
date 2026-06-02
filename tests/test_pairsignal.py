@@ -102,23 +102,35 @@ def test_reject_skips_entry():
     assert eng.pending is None
 
 
-def test_auto_exit_on_revert():
-    import math
+def test_auto_exit_on_profit_target():
     cfg = AppConfig()
     cfg.auto_approve = True
     eng = Engine(cfg)
-    # Вход LONG_spread: спред внизу (z=-2.5). Цены подобраны так, чтобы spread по ценам
-    # ln(pa)-ln(pb) согласовался со средней mid=ln(100/50)=0.693 (β=1).
-    mid = math.log(100.0 / 50.0)
-    pa_in, pb_in = 90.0, 50.0          # spread_in = ln(90/50)=0.588 < mid (внизу)
-    eng.step(_row(z=-2.5, ts=0, mid=mid, beta=1.0, pa=pa_in, pb=pb_in))
+    # Вход LONG_spread (z=-2.5): лонг A / шорт B при 90/50.
+    eng.step(_row(z=-2.5, ts=0, beta=1.0, pa=90.0, pb=50.0))
     assert eng.exch.position is not None
-    # выход по возврату к СРЕДНЕЙ: спред поднимается до mid (A дорожает до 100)
-    res = eng.step(_row(z=-0.1, ts=300_000, mid=mid, beta=1.0, pa=100.0, pb=50.0))
+    # пока сделка чуть в плюсе, но НЕ достигла цели прибыли — НЕ закрываемся
+    res = eng.step(_row(z=-1.0, ts=300_000, beta=1.0, pa=90.5, pb=50.0))
+    assert res.trade is None
+    assert eng.exch.position is not None
+    # A заметно дорожает → gross превышает цель (3× round-trip комиссий) → выход
+    res = eng.step(_row(z=0.5, ts=600_000, beta=1.0, pa=100.0, pb=50.0))
     assert res.trade is not None
     assert eng.exch.position is None
     assert res.trade.reason == "exit"
-    assert res.trade.gross_pnl > 0          # дошёл до средней → валовый P&L положителен
+    assert res.trade.gross_pnl > 0          # выход по цели прибыли → gross положителен
+
+
+def test_no_exit_below_profit_target():
+    cfg = AppConfig()
+    cfg.auto_approve = True
+    eng = Engine(cfg)
+    eng.step(_row(z=-2.5, ts=0, beta=1.0, pa=90.0, pb=50.0))
+    assert eng.exch.position is not None
+    # цены почти не сдвинулись → цель прибыли не достигнута, стоп не задет → держим
+    res = eng.step(_row(z=-1.5, ts=300_000, beta=1.0, pa=90.05, pb=50.0))
+    assert res.trade is None
+    assert eng.exch.position is not None
 
 
 def test_summary_keys():

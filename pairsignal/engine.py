@@ -27,7 +27,7 @@ class StepResult:
 class Engine:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
-        self.signal = SignalEngine(cfg.strategy)
+        self.signal = SignalEngine(cfg.strategy, taker_fee=cfg.paper.taker_fee)
         self.exch = VirtualExchange(cfg.paper)
         self.pending: Optional[Recommendation] = None
         self._bars_held = 0
@@ -47,10 +47,15 @@ class Engine:
 
     def step(self, row: IndicatorRow) -> StepResult:
         self._last_row = row
-        if self.exch.position is not None:
+        pos = self.exch.position
+        if pos is not None:
             self._bars_held += 1
 
-        rec = self.signal.evaluate(row, self.exch.position, self._bars_held)
+        # нереализованный gross и нотационал позиции — для выхода по цели прибыли
+        ug = self.exch.unrealized(row.price_a, row.price_b) if pos else 0.0
+        nt = (pos.leg_a.notional + pos.leg_b.notional) if pos else 0.0
+        rec = self.signal.evaluate(row, pos, self._bars_held,
+                                   unrealized_gross=ug, notional=nt)
 
         if rec.action in (Action.EXIT, Action.STOP):
             trade = self.exch.close_pair(row.price_a, row.price_b, row.ts, rec.action.value, row.z)

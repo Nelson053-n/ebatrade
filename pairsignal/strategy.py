@@ -13,8 +13,9 @@ from .models import Action, IndicatorRow, PairPosition, Recommendation, SpreadDi
 
 
 class SignalEngine:
-    def __init__(self, cfg: StrategyConfig):
+    def __init__(self, cfg: StrategyConfig, taker_fee: float = 0.0006):
         self.cfg = cfg
+        self._taker_fee = taker_fee   # для расчёта цели прибыли (round-trip издержки)
 
     @staticmethod
     def _valid(row: IndicatorRow) -> bool:
@@ -22,7 +23,8 @@ class SignalEngine:
         return all(v is not None and not math.isnan(v) for v in vals) and row.std > 0
 
     def evaluate(
-        self, row: IndicatorRow, position: Optional[PairPosition], bars_held: int = 0
+        self, row: IndicatorRow, position: Optional[PairPosition], bars_held: int = 0,
+        unrealized_gross: float = 0.0, notional: float = 0.0,
     ) -> Recommendation:
         c = self.cfg
         base = dict(
@@ -36,20 +38,20 @@ class SignalEngine:
         # --- управление открытой позицией (авто) ---
         if position is not None:
             d = position.direction
-            # ВЫХОД по возврату к СРЕДНЕЙ через z-score (mean-reversion). z, mid и std
-            # согласованы текущей β — это единственная согласованная система: спред,
-            # средняя и нормировка в одной β. Возврат к средней = |z| ≤ exit_z.
-            # (Фиксировать β/mid на входе нельзя — спред-с-β0 и средняя-с-динамич-β
-            #  оказываются в разных системах, и средняя становится недостижимой.)
+            # ВЫХОД по ЦЕЛИ ПРИБЫЛИ. Закрываем по возврату, когда нереализованный валовый
+            # P&L (по ногам, в β входа) достиг цели = profit_target_fees × round-trip
+            # комиссий. Это гарантирует gross ≥ 0 на выходе — устраняет «z вернулся, а
+            # P&L < 0» из-за дрейфа β и уехавшей скользящей средней (обе причины обходятся,
+            # т.к. решение принимается по реальному P&L позиции, а не по z спреда).
+            target = c.profit_target_fees * (2.0 * self._taker_fee) * notional
+            reverted = unrealized_gross >= target
+            # стоп по z (защита от ухода против позиции) — без изменений
             z = row.z
-            reverted = (d == SpreadDirection.LONG_SPREAD and z >= -c.exit_z) or (
-                d == SpreadDirection.SHORT_SPREAD and z <= c.exit_z
-            )
             stopped = (d == SpreadDirection.LONG_SPREAD and z <= -c.stop_z) or (
                 d == SpreadDirection.SHORT_SPREAD and z >= c.stop_z
             )
             if reverted:
-                return Recommendation(action=Action.EXIT, reason="возврат к средней", direction=d, **base)
+                return Recommendation(action=Action.EXIT, reason="цель прибыли", direction=d, **base)
             if stopped:
                 return Recommendation(action=Action.STOP, reason="стоп по z", direction=d, **base)
             if bars_held >= c.max_bars_in_trade:

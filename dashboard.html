@@ -366,7 +366,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <div class="strat-col">
         <h4>Выход и стоп (авто)</h4>
         <ul>
-          <li><b>возврат к средней:</b> <code>|z| ≤ порог выхода</code> — спред вернулся, фиксируем прибыль;</li>
+          <li><b>цель прибыли:</b> закрываем, когда нереализованный P&L (по ногам) достиг цели = 3× комиссий — гарантирует выход в плюс, обходя дрейф β и средней;</li>
           <li><b>стоп:</b> <code>|z| ≥ порог стопа</code> — спред ушёл против позиции, режем убыток;</li>
           <li><b>тайм-стоп:</b> позиция висит дольше лимита баров.</li>
         </ul>
@@ -575,7 +575,7 @@ function render(s){
       <td style="font-size:11px;line-height:1.5">${legs}</td>
       <td>${(+x.entry_z).toFixed(2)}</td><td>${(+x.exit_z).toFixed(2)}</td>
       <td class="${x.net_pnl>=0?'pnl-pos':'pnl-neg'}">${fmt(x.net_pnl)}</td>
-      <td class="${x.reason==='stop'?'tag-stop':'tag-exit'}">${x.reason==='stop'?'стоп':'возврат к средней'}</td></tr>`;
+      <td class="${x.reason==='stop'?'tag-stop':'tag-exit'}">${x.reason==='stop'?'стоп':'цель прибыли'}</td></tr>`;
   }).join('');
 
   // --- индикатор потока + режим в шапке ---
