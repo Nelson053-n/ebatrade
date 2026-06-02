@@ -1,0 +1,29 @@
+# systemd-сервис бэкенда ebatrade (pairsignal) — uvicorn на 0.0.0.0:8000.
+# Слушает все интерфейсы: панель проксируется с фронта 192.168.10.23 на :8000.
+# Запуск от пользователя nel, без root-привилегий.
+#
+# Установка (требует sudo):
+#   sudo cp /home/nel/trade/infra/ebatrade.service /etc/systemd/system/ebatrade.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ebatrade
+# Проверка:   systemctl status ebatrade   |   journalctl -u ebatrade -f
+
+[Unit]
+Description=ebatrade backend (pairsignal paper) — uvicorn API + panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nel
+Group=nel
+WorkingDirectory=/home/nel/trade
+ExecStart=/home/nel/trade/.venv/bin/python -m uvicorn pairsignal.api:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+# мягкая остановка, чтобы фоновые задачи (плеер/поллер) завершились
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

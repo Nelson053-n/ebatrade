@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# basic-auth хэш (не нужен — auth снят)
+infra/trade.htpasswd

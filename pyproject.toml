@@ -1,0 +1,34 @@
+[project]
+name = "pairsignal"
+version = "0.1.0"
+description = "Парный спред-аналитик + виртуальная биржа (phase 1, paper only)"
+requires-python = ">=3.12"
+dependencies = [
+    "ccxt>=4.4",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "pydantic>=2.5",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.4"]
+
+[project.scripts]
+pairsignal = "pairsignal.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pairsignal"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"

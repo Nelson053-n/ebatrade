@@ -1,0 +1,73 @@
+"""Сигнальный движок.
+
+Чистая логика: по текущему срезу индикаторов и наличию позиции возвращает
+рекомендацию. Вход — только рекомендация (решает оператор), выход/стоп — авто.
+"""
+from __future__ import annotations
+
+import math
+from typing import Optional
+
+from .config import StrategyConfig
+from .models import Action, IndicatorRow, PairPosition, Recommendation, SpreadDirection
+
+
+class SignalEngine:
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    @staticmethod
+    def _valid(row: IndicatorRow) -> bool:
+        vals = [row.z, row.mid, row.std, row.width_pct, row.beta]
+        return all(v is not None and not math.isnan(v) for v in vals) and row.std > 0
+
+    def evaluate(
+        self, row: IndicatorRow, position: Optional[PairPosition], bars_held: int = 0
+    ) -> Recommendation:
+        c = self.cfg
+        base = dict(
+            ts=row.ts, z=row.z, spread=row.spread, mid=row.mid,
+            upper=row.upper, lower=row.lower, width_pct=row.width_pct,
+            beta=row.beta, price_a=row.price_a, price_b=row.price_b,
+        )
+        if not self._valid(row):
+            return Recommendation(action=Action.NONE, reason="прогрев индикаторов", **base)
+
+        # --- управление открытой позицией (авто) ---
+        if position is not None:
+            d = position.direction
+            # ВЫХОД по возврату к СРЕДНЕЙ через z-score (mean-reversion). z, mid и std
+            # согласованы текущей β — это единственная согласованная система: спред,
+            # средняя и нормировка в одной β. Возврат к средней = |z| ≤ exit_z.
+            # (Фиксировать β/mid на входе нельзя — спред-с-β0 и средняя-с-динамич-β
+            #  оказываются в разных системах, и средняя становится недостижимой.)
+            z = row.z
+            reverted = (d == SpreadDirection.LONG_SPREAD and z >= -c.exit_z) or (
+                d == SpreadDirection.SHORT_SPREAD and z <= c.exit_z
+            )
+            stopped = (d == SpreadDirection.LONG_SPREAD and z <= -c.stop_z) or (
+                d == SpreadDirection.SHORT_SPREAD and z >= c.stop_z
+            )
+            if reverted:
+                return Recommendation(action=Action.EXIT, reason="возврат к средней", direction=d, **base)
+            if stopped:
+                return Recommendation(action=Action.STOP, reason="стоп по z", direction=d, **base)
+            if bars_held >= c.max_bars_in_trade:
+                return Recommendation(action=Action.STOP, reason="тайм-стоп", direction=d, **base)
+            return Recommendation(action=Action.NONE, reason="удержание", direction=d, **base)
+
+        # --- поиск входа (рекомендация оператору) ---
+        if row.width_pct < c.min_width_pct:
+            return Recommendation(action=Action.NONE, reason=f"флэт: канал {row.width_pct:.2f}% < {c.min_width_pct}%", **base)
+
+        if -c.stop_z < row.z <= -c.entry_z:
+            return Recommendation(
+                action=Action.ENTER, direction=SpreadDirection.LONG_SPREAD,
+                reason=f"спред у нижней полосы (z={row.z:.2f}) → лонг {c.symbol_a} / шорт {c.symbol_b}", **base,
+            )
+        if c.allow_short_spread and c.entry_z <= row.z < c.stop_z:
+            return Recommendation(
+                action=Action.ENTER, direction=SpreadDirection.SHORT_SPREAD,
+                reason=f"спред у верхней полосы (z={row.z:.2f}) → шорт {c.symbol_a} / лонг {c.symbol_b}", **base,
+            )
+        return Recommendation(action=Action.NONE, reason=f"нет сигнала (z={row.z:.2f})", **base)
