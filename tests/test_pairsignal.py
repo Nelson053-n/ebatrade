@@ -39,14 +39,16 @@ def test_entry_long_spread_at_low_z():
 
 
 def test_no_entry_beyond_stop():
-    eng = SignalEngine(StrategyConfig())  # stop_z=3.5
-    rec = eng.evaluate(_row(z=-4.0), position=None)
+    cfg = StrategyConfig(); cfg.stop_z = 3.5   # явный порог для теста
+    eng = SignalEngine(cfg)
+    rec = eng.evaluate(_row(z=-4.0), position=None)   # |z| за стопом → входа нет
     assert rec.action == Action.NONE
 
 
 def test_width_filter_blocks_entry():
-    eng = SignalEngine(StrategyConfig())  # min_width_pct=2
-    rec = eng.evaluate(_row(z=-2.5, width=1.0), position=None)
+    cfg = StrategyConfig(); cfg.min_width_pct = 2.0   # явный порог для теста
+    eng = SignalEngine(cfg)
+    rec = eng.evaluate(_row(z=-2.5, width=1.0), position=None)  # ширина ниже порога
     assert rec.action == Action.NONE
 
 
