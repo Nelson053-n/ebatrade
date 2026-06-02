@@ -324,6 +324,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
   <div class="controls">
     <button class="ctrl-btn" id="btnMode">источник: синтетика</button>
     <button class="ctrl-btn" id="btnAuto">авто-вход: выкл</button>
+    <button class="ctrl-btn" id="btnPreset">пресет: —</button>
     <button class="ctrl-btn" id="btnPause">❚❚ пауза потока</button>
     <button class="ctrl-btn" id="btnReset">↺ сброс сессии</button>
     <span id="mode-hint">данные — синтетический генератор (демо)</span>
@@ -604,6 +605,12 @@ function render(s){
   if(s.auto_approve){ aBtn.textContent='авто-вход: ВКЛ'; aBtn.classList.add('live-on'); }
   else { aBtn.textContent='авто-вход: выкл'; aBtn.classList.remove('live-on'); }
 
+  // кнопка пресета (показывает активный)
+  const pBtn=$('btnPreset');
+  const pcur=PRESETS.find(p=>p.key===s.preset);
+  pBtn.textContent='пресет: '+(pcur?pcur.label:'свой');
+  pBtn.title=pcur?pcur.desc:'параметры изменены вручную';
+
   // кнопка паузы потока актуальна только для синтетики
   $('btnPause').style.display = s.live ? 'none' : '';
 
@@ -659,6 +666,27 @@ $('btnAuto').onclick=async()=>{
   $('btnAuto').disabled=true;
   try{ await api('/auto?on='+on,'POST'); }catch(e){}
   $('btnAuto').disabled=false; poll();
+};
+
+/* ===== ПРЕСЕТ ПАРАМЕТРОВ (= POST /preset, циклит между пресетами, со сбросом) ===== */
+let PRESETS=[];   // [{key,label,desc}]
+async function loadPresets(){
+  try{ const d=await api('/presets'); PRESETS=d.presets||[]; }catch(e){}
+}
+$('btnPreset').onclick=async()=>{
+  if(!PRESETS.length) return;
+  const cur=(snap&&snap.preset)||null;
+  const idx=PRESETS.findIndex(p=>p.key===cur);
+  const next=PRESETS[(idx+1)%PRESETS.length];          // следующий по кругу
+  $('btnPreset').disabled=true;
+  $('mode-hint').textContent='применяю пресет «'+next.label+'»…';
+  try{
+    const r=await api('/preset?key='+next.key,'POST');
+    fillParams(r.config);
+    if(r.was_live) await api('/live/start','POST');
+    else await api('/player/start','POST');
+  }catch(e){ $('mode-hint').textContent='ошибка пресета: '+e.message; }
+  $('btnPreset').disabled=false; poll();
 };
 
 /* ===== АНАЛИТИКА (= GET /analyze, моделирование на истории) ===== */
@@ -832,6 +860,7 @@ resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
 (async()=>{
   try{ fillParams(await api('/config')); }catch(e){}
   await loadPairs();
+  await loadPresets();
   // по умолчанию: синтетика с постоянным движением + авто-вход
   try{
     const s=await api('/state');

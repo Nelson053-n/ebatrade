@@ -42,6 +42,22 @@ PAIRS = [
     ("XRP/USDT:USDT", "ADA/USDT:USDT"),
 ]
 
+# пресеты параметров (подобраны grid-search на 6-мес истории, out-of-sample)
+PRESETS = {
+    "balanced": {
+        "label": "Сбалансированный",
+        "desc": "оптимум: прибыльный на истории (+59 за 6 мес по 4 парам)",
+        "entry_z": 1.5, "stop_z": 4.0, "profit_target_fees": 6.0,
+        "bb_period": 120, "min_width_pct": 0.5,
+    },
+    "conservative": {
+        "label": "Консервативный",
+        "desc": "реже входит, дальше стоп: ниже риск, результат около нуля",
+        "entry_z": 2.5, "stop_z": 5.0, "profit_target_fees": 8.0,
+        "bb_period": 240, "min_width_pct": 0.5,
+    },
+}
+
 
 def _sym_short(symbol: str) -> str:
     """BTC/USDT:USDT → BTC (короткая подпись ноги для UI)."""
@@ -208,6 +224,45 @@ def pairs():
     }
 
 
+def _current_preset() -> str | None:
+    """Определить, какому пресету соответствует текущий конфиг (или None)."""
+    s = cfg.strategy
+    for key, p in PRESETS.items():
+        if (s.entry_z == p["entry_z"] and s.stop_z == p["stop_z"]
+                and s.profit_target_fees == p["profit_target_fees"]
+                and s.bb_period == p["bb_period"]):
+            return key
+    return None
+
+
+@app.get("/presets")
+def presets():
+    """Доступные пресеты параметров для панели."""
+    return {
+        "presets": [{"key": k, "label": p["label"], "desc": p["desc"]} for k, p in PRESETS.items()],
+        "current": _current_preset(),
+    }
+
+
+@app.post("/preset")
+def set_preset(key: str):
+    """Применить пресет параметров (со сбросом сессии)."""
+    if key not in PRESETS:
+        raise HTTPException(400, f"неизвестный пресет: {key}")
+    p = PRESETS[key]
+    s = cfg.strategy
+    s.entry_z = p["entry_z"]
+    s.stop_z = p["stop_z"]
+    s.profit_target_fees = p["profit_target_fees"]
+    s.bb_period = p["bb_period"]
+    s.min_width_pct = p["min_width_pct"]
+    was_live, was_player = _state["live"], _state["player"]
+    _state["live"] = _state["player"] = False
+    _reset_engine()
+    return {"ok": True, "preset": key, "config": cfg.model_dump(),
+            "was_live": was_live, "was_player": was_player}
+
+
 @app.get("/analyze")
 async def analyze(period: str = "day"):
     """Моделирование стратегии на РЕАЛЬНОЙ истории MEXC за период.
@@ -355,6 +410,7 @@ def state():
         "live": _state["live"],
         "player": _state["player"],
         "auto_approve": cfg.auto_approve,     # режим авто-входа
+        "preset": _current_preset(),          # активный пресет параметров
         "pair": {                             # текущая пара (короткие подписи ног)
             "a": _sym_short(cfg.strategy.symbol_a),
             "b": _sym_short(cfg.strategy.symbol_b),
