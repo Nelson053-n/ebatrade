@@ -76,7 +76,8 @@ header{display:flex;align-items:center;gap:18px;padding-bottom:18px;border-botto
 
 /* chart */
 .chartwrap{position:relative}
-canvas{width:100%;height:280px;display:block}
+#chart{width:100%;height:360px;display:block}
+canvas{width:100%;display:block}
 .legend{display:flex;gap:18px;margin-top:10px;font-size:10px;color:var(--ink-dim);letter-spacing:.5px}
 .legend i{display:inline-block;width:18px;height:0;border-top:2px solid;margin-right:6px;vertical-align:middle}
 
@@ -122,6 +123,7 @@ button:disabled{opacity:.25;cursor:not-allowed;transform:none}
 .idle-mark{font-size:11px;color:var(--ink-faint);letter-spacing:1px;margin-top:10px}
 
 /* position */
+#pos-body{min-height:152px;display:flex;flex-direction:column;justify-content:center}
 .pos .row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:12px}
 .pos .row:last-child{border:0}
 .pos .row span:first-child{color:var(--ink-dim)}
@@ -511,6 +513,37 @@ function draw(series){
   ctx.setLineDash([4,4]);ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.mid);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.mid;ctx.stroke();ctx.setLineDash([]);
   ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.spread);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
   ctx.strokeStyle=C.line;ctx.lineWidth=1.6;ctx.stroke();
+
+  // --- точки входа/выхода сделок: кружок входа, кружок выхода, неяркая линия между ---
+  const win=cs.getPropertyValue('--signal').trim(), loss=cs.getPropertyValue('--loss').trim();
+  const ink=cs.getPropertyValue('--ink').trim(), panel=cs.getPropertyValue('--panel').trim();
+  const idxAt=ts=>{ let bi=0,bd=Infinity; series.forEach((p,i)=>{const d=Math.abs((p.ts||0)-ts); if(d<bd){bd=d;bi=i;}}); return bi; };
+  const t0=series[0].ts, t1=series[series.length-1].ts;
+  const inRange=ts=>ts!=null && ts>=t0-1 && ts<=t1+1;
+  const ring=(X,Y,col)=>{ ctx.beginPath();ctx.arc(X,Y,4,0,7);ctx.fillStyle=panel;ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=col;ctx.stroke(); };
+  (window._trades||[]).forEach(t=>{
+    if(!inRange(t.entry_ts)) return;
+    const col = t.net_pnl>=0 ? win : loss;
+    const i1=idxAt(t.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
+    if(inRange(t.exit_ts)){
+      const i2=idxAt(t.exit_ts), X2=x(i2), Y2=y(series[i2].spread);
+      // неяркая линия вход→выход
+      ctx.save(); ctx.globalAlpha=.35; ctx.strokeStyle=col; ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(X2,Y2);ctx.stroke(); ctx.restore();
+      ring(X2,Y2,col);   // выход
+    }
+    ring(X1,Y1,ink);     // вход (нейтральный)
+  });
+  // открытая позиция: кружок входа + неяркая линия до текущей точки
+  const op=window._openPos;
+  if(op && inRange(op.entry_ts)){
+    const i1=idxAt(op.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
+    const lastp=series[series.length-1], Xc=x(series.length-1), Yc=y(lastp.spread);
+    ctx.save(); ctx.globalAlpha=.3; ctx.strokeStyle=ink; ctx.setLineDash([3,3]); ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(Xc,Yc);ctx.stroke(); ctx.restore();
+    ring(X1,Y1,ink);
+  }
+
   const last=series[series.length-1];const lx=x(series.length-1),ly=y(last.spread);
   ctx.beginPath();ctx.arc(lx,ly,3.5,0,7);ctx.fillStyle=C.line;ctx.shadowColor=C.line;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
 }
@@ -644,6 +677,9 @@ function render(s){
   // кнопка паузы потока актуальна только для синтетики
   $('btnPause').style.display = s.live ? 'none' : '';
 
+  // данные для отметок входа/выхода на графике
+  window._trades = s.trades||[];
+  window._openPos = s.position ? {entry_ts: s.position.entry_ts} : null;
   draw(hist);
 }
 
