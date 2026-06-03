@@ -122,9 +122,10 @@ button:disabled{opacity:.25;cursor:not-allowed;transform:none}
 .idle-mark{font-size:11px;color:var(--ink-faint);letter-spacing:1px;margin-top:10px}
 
 /* position */
-.pos .row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--line);font-size:12px}
+.pos .row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:12px}
 .pos .row:last-child{border:0}
 .pos .row span:first-child{color:var(--ink-dim)}
+.pos .row span:last-child{white-space:nowrap;flex-shrink:0;text-align:right}
 .pnl-pos{color:var(--signal)} .pnl-neg{color:var(--loss)}
 .empty{color:var(--ink-faint);font-size:12px;text-align:center;padding:18px 0;letter-spacing:1px}
 
@@ -554,7 +555,7 @@ function render(s){
   } else {
     rec.classList.remove('enter'); $('rec-body').style.display='none'; $('rec-idle').style.display='block';
     $('rec-z').textContent='';
-    if(pos){ $('rec-state').textContent='УДЕРЖАНИЕ'; $('rec-state').style.color='var(--ink)'; $('rec-reason').textContent='Позиция открыта. Выход — авто по возврату к средней или стопу.'; }
+    if(pos){ $('rec-state').textContent='УДЕРЖАНИЕ'; $('rec-state').style.color='var(--ink)'; $('rec-reason').textContent='Позиция открыта. Выход — авто по цели прибыли или стопу.'; }
     else { $('rec-state').textContent='НЕТ СИГНАЛА'; $('rec-state').style.color='var(--ink)'; $('rec-reason').textContent='Спред внутри канала. Ждём касания полосы.'; }
   }
 
@@ -575,8 +576,8 @@ function render(s){
     pb.innerHTML=`
       <div class="row"><span>направление</span><span class="${long?'dir-long':'dir-short'}">${long?('лонг '+PA+' / шорт '+PB):('шорт '+PA+' / лонг '+PB)}</span></div>
       <div class="row"><span>вход z</span><span>${(+pos.entry_z).toFixed(2)}</span></div>
-      <div class="row"><span>нотационал ${pos.leg_a.symbol}</span><span>${(+pos.leg_a.notional).toFixed(0)} USDT</span></div>
-      <div class="row"><span>нотационал ${pos.leg_b.symbol}</span><span>${(+pos.leg_b.notional).toFixed(0)} USDT</span></div>
+      <div class="row"><span>нотационал ${PA}</span><span>${(+pos.leg_a.notional).toFixed(0)} USDT</span></div>
+      <div class="row"><span>нотационал ${PB}</span><span>${(+pos.leg_b.notional).toFixed(0)} USDT</span></div>
       <div class="row"><span>нереализованный P&L</span><span class="${upnlVal>=0?'pnl-pos':'pnl-neg'}">${fmt(upnlVal)} USDT</span></div>`;
   } else pb.innerHTML='<div class="empty">нет открытой позиции</div>';
 
