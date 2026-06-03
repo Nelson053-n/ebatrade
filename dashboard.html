@@ -920,11 +920,20 @@ resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
   try{ fillParams(await api('/config')); }catch(e){}
   await loadPairs();
   await loadPresets();
-  // по умолчанию: синтетика с постоянным движением + авто-вход
+  // Сессия НЕ сбрасывается при перезагрузке браузера: автозапуск только если сессии
+  // ещё не было (session_started == null). Если сессия уже идёт или на паузе —
+  // просто подключаемся к ней, не трогая журнал/время/позицию.
   try{
     const s=await api('/state');
-    if(!s.auto_approve) await api('/auto?on=true','POST');           // авто-вход сразу
-    if(!s.player && !s.live){ await api('/player/start','POST'); $('btnPause').textContent='❚❚ пауза потока'; }
+    const fresh = !s.session_started;        // на сервере ещё не стартовала ни одна сессия
+    if(fresh){
+      if(!s.auto_approve) await api('/auto?on=true','POST');         // авто-вход для новой сессии
+      await api('/player/start','POST');                            // синтетика по умолчанию
+      $('btnPause').textContent='❚❚ пауза потока';
+    } else {
+      // сессия существует — отражаем её текущий статус потока на кнопке паузы
+      $('btnPause').textContent = (s.player||s.live) ? '❚❚ пауза потока' : '▶ запустить поток';
+    }
   }catch(e){}
   poll(); setInterval(poll, POLL_MS);
 })();
