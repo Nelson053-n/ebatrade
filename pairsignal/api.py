@@ -480,11 +480,23 @@ def live_stop():
 
 @app.post("/player/start")
 async def player_start(limit: int = 2000):
-    """Запустить синтетический плеер с чистого листа (human-in-the-loop)."""
+    """Запустить/ВОЗОБНОВИТЬ синтетический плеер.
+
+    Если плеер был на паузе и не доигран — ВОЗОБНОВЛЯЕМ с того же места, БЕЗ сброса
+    сессии (журнал/сделки/время сохраняются). Свежий старт со сбросом — только когда
+    плеера ещё не было или он доигран до конца. Сброс сессии — отдельная кнопка/эндпоинт.
+    """
     global _player_rows
     if _state["player"]:
         return {"ok": True, "already": True}
     _state["live"] = False            # плеер и live взаимоисключаются
+    paused = bool(_player_rows) and _player_idx < len(_player_rows)
+    if paused:
+        # возобновление: движок и позиция сохранены, продолжаем фоновую подачу баров
+        _state["player"] = True
+        asyncio.create_task(_player())
+        return {"ok": True, "resumed": True}
+    # свежий старт — чистая сессия
     _reset_engine()
     df = generate_synthetic(n=limit)
     _player_rows = Engine.rows_from_df(df, cfg.strategy)
