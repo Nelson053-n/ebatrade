@@ -77,8 +77,14 @@ header{display:flex;align-items:center;gap:18px;padding-bottom:18px;border-botto
 
 /* chart — панель спреда растягивается до высоты правой колонки, график заполняет остаток */
 .chartwrap{flex:1;display:flex;flex-direction:column}
-#chart{width:100%;flex:1;min-height:300px;display:block}
+#chart{width:100%;flex:1;min-height:300px;display:block;cursor:crosshair}
 canvas{width:100%;display:block}
+.chart-tools{display:inline-flex;gap:3px;margin-left:auto;align-items:center}
+.chart-tools button{font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:0;text-transform:none;
+  color:var(--ink-dim);border:1px solid var(--line);background:var(--bg);padding:2px 7px;border-radius:5px;cursor:pointer;transition:.15s}
+.chart-tools button:hover{color:var(--ink);border-color:var(--signal)}
+.chart-tools button.on{color:var(--signal);border-color:var(--signal)}
+.chart-tools .zhint{font-size:9px;color:var(--ink-faint);margin-left:6px;text-transform:none;letter-spacing:0}
 .legend{display:flex;gap:18px;margin-top:10px;font-size:10px;color:var(--ink-dim);letter-spacing:.5px}
 .legend i{display:inline-block;width:18px;height:0;border-top:2px solid;margin-right:6px;vertical-align:middle}
 
@@ -236,7 +242,8 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <!-- LEFT: chart + indicators -->
     <div>
       <div class="panel chartwrap fade" style="animation-delay:.05s">
-        <h2><span id="chart-title">Спред</span> <em id="chart-sub">ln(BTC) − β·ln(ETH) · BB(240, 2σ)</em></h2>
+        <h2><span id="chart-title">Спред</span> <em id="chart-sub">ln(BTC) − β·ln(ETH) · BB(240, 2σ)</em>
+          <span class="chart-tools" id="chart-tf"></span></h2>
         <canvas id="chart"></canvas>
         <div class="legend">
           <span><i style="border-color:var(--ink)"></i>спред</span>
@@ -352,7 +359,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <div class="fld"><label>стоп |z| ≥</label><input id="p-stop" type="number" step="0.1" min="0.1"></div>
       <div class="fld"><label>выход |z| ≤</label><input id="p-exit" type="number" step="0.05" min="0"></div>
       <div class="fld"><label>сайзинг %</label><input id="p-risk" type="number" step="0.5" min="0.1"></div>
-      <div class="fld"><label>таймфрейм</label><select id="p-tf"><option value="5m">5m</option><option value="15m">15m</option></select></div>
+      <div class="fld"><label>таймфрейм</label><select id="p-tf"><option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option><option value="1h">1h</option><option value="4h">4h</option></select></div>
       <button class="ctrl-btn approve apply" id="btnApply">✓ применить</button>
       <span class="hint" id="params-msg">доллар-нейтрально · ноги по β</span>
     </div>
@@ -474,10 +481,22 @@ async function loadPairs(){
 /* ===== ОТРИСОВКА ГРАФИКА (по реальной истории спреда из backend) ===== */
 const cv=$('chart'), ctx=cv.getContext('2d');
 function resize(){const r=cv.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio;ctx.setTransform(1,0,0,1,0,0);ctx.scale(devicePixelRatio,devicePixelRatio);}
+// видимое окно графика: _zoom = доля видимых баров (1 = всё), _panRight = индекс правого края (null = последний)
+let _zoom=1, _panRight=null, _fullLen=0;
+function resetZoom(){ _zoom=1; _panRight=null; }
 function draw(series){
   const W=cv.getBoundingClientRect().width, H=cv.getBoundingClientRect().height;
   ctx.clearRect(0,0,W,H);
-  series=(series||[]).filter(p=>p.mid!=null&&!Number.isNaN(p.mid));
+  let full=aggregateHistory((series||[]).filter(p=>p.mid!=null&&!Number.isNaN(p.mid)));
+  if(full.length<2) return;
+  _fullLen=full.length;
+  // применяем зум/панораму: вырезаем видимое окно
+  const visN=Math.max(10, Math.round(full.length*_zoom));
+  let right = _panRight==null ? full.length : Math.min(full.length, Math.max(visN, _panRight));
+  let left = Math.max(0, right-visN);
+  series = full.slice(left, right);
+  window._viewLeftTs = series.length?series[0].ts:null;
+  window._viewRightTs = series.length?series[series.length-1].ts:null;
   if(series.length<2) return;
   const cs=getComputedStyle(document.documentElement);
   const C={fill:cs.getPropertyValue('--chart-fill').trim(),band:cs.getPropertyValue('--chart-band').trim(),
@@ -554,6 +573,35 @@ function draw(series){
   const last=series[series.length-1];const lx=x(series.length-1),ly=y(last.spread);
   ctx.beginPath();ctx.arc(lx,ly,3.5,0,7);ctx.fillStyle=C.line;ctx.shadowColor=C.line;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
 }
+
+/* ===== ЗУМ КОЛЕСОМ + ПАНОРАМИРОВАНИЕ ===== */
+function redrawChart(){ if(snap) draw(snap.history); }
+cv.addEventListener('wheel',e=>{
+  e.preventDefault();
+  if(_fullLen<2) return;
+  const k = e.deltaY<0 ? 0.85 : 1/0.85;        // вверх — приблизить
+  const nz = Math.min(1, Math.max(10/_fullLen, _zoom*k));
+  // зум к правому краю (последние бары важнее)
+  if(_panRight==null) _panRight=_fullLen;
+  _zoom=nz;
+  if(_zoom>=1){ _panRight=null; }               // полностью отдалили — сброс панорамы
+  redrawChart();
+},{passive:false});
+let _drag=null;
+cv.addEventListener('mousedown',e=>{ _drag={x:e.clientX, panRight:_panRight==null?_fullLen:_panRight}; cv.style.cursor='grabbing'; });
+addEventListener('mousemove',e=>{
+  if(!_drag||_fullLen<2) return;
+  const W=cv.getBoundingClientRect().width;
+  const visN=Math.max(10,Math.round(_fullLen*_zoom));
+  const dxBars = Math.round((e.clientX-_drag.x)/W*visN);   // сдвиг в барах
+  let nr = _drag.panRight - dxBars;
+  nr = Math.max(visN, Math.min(_fullLen, nr));
+  _panRight = nr>=_fullLen ? null : nr;
+  redrawChart();
+});
+addEventListener('mouseup',()=>{ if(_drag){ _drag=null; cv.style.cursor='crosshair'; } });
+// двойной клик — сброс зума
+cv.addEventListener('dblclick',()=>{ resetZoom(); redrawChart(); });
 
 /* ===== РЕНДЕР СОСТОЯНИЯ ИЗ /state ===== */
 function tsLabel(ms){const d=new Date(ms);return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');}
@@ -668,7 +716,9 @@ function render(s){
     mHint.textContent='синтетический генератор (демо)';
     $('chart-title').textContent='Синтетический спред '+A+'/'+B;
   }
-  $('chart-sub').textContent='ln('+A+') − β·ln('+B+') · TF '+tf+' · BB(240, 2σ)';
+  $('chart-sub').textContent='ln('+A+') − β·ln('+B+') · BB(240, 2σ)';
+  // подсветка активного TF над графиком
+  updateTFButtons();
 
   // кнопка авто-входа
   const aBtn=$('btnAuto');
@@ -753,6 +803,47 @@ $('btnAuto').onclick=async()=>{
 let PRESETS=[];   // [{key,label,desc}]
 async function loadPresets(){
   try{ const d=await api('/presets'); PRESETS=d.presets||[]; }catch(e){}
+}
+
+/* ===== ТАЙМФРЕЙМ ГРАФИКА (только отображение, БЕЗ сброса сессии) ===== */
+// Кнопки агрегируют свечи на клиенте: базовый TF сессии (5m) → 15m/1h/4h группировкой.
+// Стратегия и расчёты на сервере не меняются — это визуальная агрегация спреда.
+const TF_MIN={'1m':1,'5m':5,'15m':15,'1h':60,'4h':240};
+let TFS=[], _chartTF=null;   // _chartTF = выбранный TF графика (null = базовый сессии)
+async function loadTimeframes(){
+  try{ const d=await api('/timeframes'); TFS=d.timeframes||[]; }catch(e){}
+  const box=$('chart-tf'); box.innerHTML='';
+  TFS.forEach(tf=>{
+    const btn=document.createElement('button'); btn.textContent=tf; btn.dataset.tf=tf;
+    btn.onclick=()=>{ _chartTF=tf; resetZoom(); redrawChart(); updateTFButtons(); };
+    box.appendChild(btn);
+  });
+  const z=document.createElement('span'); z.className='zhint'; z.textContent='колесо — зум · тащить — сдвиг';
+  box.appendChild(z);
+}
+function baseTF(){ return (snap&&snap.timeframe)||'5m'; }
+function updateTFButtons(){
+  const cur=_chartTF||baseTF();
+  $('chart-tf').querySelectorAll('button').forEach(b=>{
+    b.classList.toggle('on', b.dataset.tf===cur);
+    // нельзя агрегировать вниз базового TF — такие кнопки недоступны
+    b.disabled = TF_MIN[b.dataset.tf] < TF_MIN[baseTF()];
+  });
+}
+// агрегация истории под выбранный TF графика (группами баров)
+function aggregateHistory(hist){
+  if(!hist||!hist.length) return hist||[];
+  const cur=_chartTF||baseTF();
+  const factor=Math.max(1, Math.round(TF_MIN[cur]/TF_MIN[baseTF()]));
+  if(factor<=1) return hist;
+  const out=[];
+  for(let i=0;i<hist.length;i+=factor){
+    const grp=hist.slice(i,i+factor); if(!grp.length) continue;
+    const last=grp[grp.length-1];
+    // спред/полосы берём по последнему бару группы (значения на закрытии)
+    out.push({ts:last.ts, spread:last.spread, mid:last.mid, upper:last.upper, lower:last.lower, z:last.z});
+  }
+  return out;
 }
 $('btnPreset').onclick=async()=>{
   if(!PRESETS.length) return;
@@ -977,6 +1068,7 @@ resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
   try{ fillParams(await api('/config')); }catch(e){}
   await loadPairs();
   await loadPresets();
+  await loadTimeframes();
   // Сессия НЕ сбрасывается при перезагрузке браузера: автозапуск только если сессии
   // ещё не было (session_started == null). Если сессия уже идёт или на паузе —
   // просто подключаемся к ней, не трогая журнал/время/позицию.

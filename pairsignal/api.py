@@ -43,6 +43,9 @@ PAIRS = [
     ("XRP/USDT:USDT", "ADA/USDT:USDT"),
 ]
 
+# поддерживаемые таймфреймы MEXC → длительность в минутах
+TIMEFRAMES = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240}
+
 # пресеты параметров (подобраны grid-search + multi-agent ресёрч, out-of-sample train/test)
 PRESETS = {
     "balanced": {
@@ -228,6 +231,12 @@ def pairs():
     }
 
 
+@app.get("/timeframes")
+def timeframes():
+    """Список доступных таймфреймов для графика."""
+    return {"timeframes": list(TIMEFRAMES), "current": cfg.strategy.timeframe}
+
+
 def _current_preset() -> str | None:
     """Определить, какому пресету соответствует текущий конфиг (или None)."""
     s = cfg.strategy
@@ -278,7 +287,7 @@ async def analyze(period: str = "day"):
     if period not in ("day", "week"):
         raise HTTPException(400, "period: day или week")
     # баров в окне периода по таймфрейму
-    tf_min = 15 if cfg.strategy.timeframe == "15m" else 5
+    tf_min = TIMEFRAMES.get(cfg.strategy.timeframe, 5)
     per_day = 24 * 60 // tf_min
     window = per_day if period == "day" else per_day * 7
     limit = _warmup_limit() + window            # прогрев + окно анализа
@@ -379,8 +388,8 @@ def set_config(payload: dict):
     ex = exit_ if exit_ is not None else s.exit_z
     if not (ex < e < st):
         raise HTTPException(400, f"нужно выход({ex}) < вход({e}) < стоп({st})")
-    if tf is not None and tf not in ("5m", "15m"):
-        raise HTTPException(400, "timeframe: только 5m или 15m")
+    if tf is not None and tf not in TIMEFRAMES:
+        raise HTTPException(400, f"timeframe: один из {list(TIMEFRAMES)}")
 
     # пара бумаг — только из списка PAIRS (надёжные символы MEXC)
     sa, sb = payload.get("symbol_a"), payload.get("symbol_b")
@@ -422,6 +431,7 @@ def state():
             "a": _sym_short(cfg.strategy.symbol_a),
             "b": _sym_short(cfg.strategy.symbol_b),
         },
+        "timeframe": cfg.strategy.timeframe,  # текущий таймфрейм
         "pending_recommendation": pending,   # ждёт решения оператора
         "position": pos,
         "summary": engine.summary(),
