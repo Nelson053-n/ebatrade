@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import time
 from contextlib import asynccontextmanager
@@ -25,10 +26,11 @@ from fastapi.responses import FileResponse
 from .config import AppConfig
 from .data_feed import generate_synthetic, read_ohlcv_ccxt
 from .engine import Engine
-from .models import IndicatorRow
+from .models import IndicatorRow, SpreadDirection, Trade
 
 DASHBOARD = Path(__file__).resolve().parent.parent / "dashboard.html"
 HISTORY_LEN = 120  # сколько последних закрытых баров держим для графика
+SESSION_FILE = Path(__file__).resolve().parent.parent / "session_state.json"
 
 # популярные ликвидные перпы MEXC для парного спреда (формат CCXT)
 PAIRS = [
@@ -77,7 +79,8 @@ cfg = AppConfig()
 engine = Engine(cfg)
 _server_started = time.time()       # момент запуска процесса (uptime сервера)
 _state: dict = {"live": False, "player": False, "last_rec": None,
-                "session_started": None}   # старт текущей торговой сессии (обнуляется сбросом)
+                "session_started": None,   # старт текущей торговой сессии (обнуляется сбросом)
+                "paused_by_user": False}   # пауза нажата оператором (≠ поток сам доиграл)
 _history: list[dict] = []           # срез индикаторов по обработанным барам (для графика)
 _player_rows: list[IndicatorRow] = []
 _player_idx = 0
@@ -93,6 +96,59 @@ def _reset_engine() -> None:
     _last_live_ts = 0
     _state["last_rec"] = None
     _state["session_started"] = time.time()   # старт новой торговой сессии
+    _save_session()
+
+
+def _save_session() -> None:
+    """Сохранить результаты сессии на диск (переживают перезапуск сервера).
+
+    Пишем журнал сделок, баланс, время сессии, историю графика и ключевые настройки.
+    Точное место плеера/открытую позицию не персистим — после рестарта поток
+    стартует заново (свежая синтетика), но РЕЗУЛЬТАТЫ прошлой сессии сохраняются.
+    """
+    try:
+        data = {
+            "session_started": _state["session_started"],
+            "balance": engine.exch.balance,
+            "trades": [asdict(t) for t in engine.exch.trades],
+            "history": _history,
+            "strategy": cfg.strategy.model_dump(),
+            "paper": cfg.paper.model_dump(),
+            "auto_approve": cfg.auto_approve,
+        }
+        SESSION_FILE.write_text(json.dumps(_clean(data)))
+    except Exception:  # noqa: BLE001  персистентность не должна ронять рантайм
+        pass
+
+
+def _load_session() -> bool:
+    """Восстановить результаты сессии при старте сервера. True — если восстановили."""
+    if not SESSION_FILE.exists():
+        return False
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        # настройки
+        for k, v in (data.get("strategy") or {}).items():
+            if hasattr(cfg.strategy, k):
+                setattr(cfg.strategy, k, v)
+        for k, v in (data.get("paper") or {}).items():
+            if hasattr(cfg.paper, k):
+                setattr(cfg.paper, k, v)
+        cfg.auto_approve = data.get("auto_approve", cfg.auto_approve)
+        # результаты в чистый движок
+        global engine, _history
+        engine = Engine(cfg)
+        engine.exch.balance = data.get("balance", engine.exch.balance)
+        engine.exch.trades = [Trade(**{**t, "direction": SpreadDirection(t["direction"])})
+                              for t in data.get("trades", [])]
+        _history = data.get("history", [])
+        _state["session_started"] = data.get("session_started", time.time())
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _warmup_limit() -> int:
@@ -158,6 +214,8 @@ async def _poller():
                 _push_history(r)
                 _last_live_ts = r.ts
                 _state["last_rec"] = _clean(asdict(res.rec))
+                if res.trade is not None:
+                    _save_session()
                 # на стартовом replay — быстрый темп между ВАЛИДНЫМИ барами (прогрев,
                 # где mid/z=NaN и история пуста, проматываем мгновенно)
                 if not replayed and _history:
@@ -185,6 +243,8 @@ async def _player():
         res = engine.step(row)
         _push_history(row)
         _state["last_rec"] = _clean(asdict(res.rec))
+        if res.trade is not None:
+            _save_session()           # сделка закрыта — фиксируем результаты на диск
         # прогрев индикаторов (mid/z=NaN) проматываем мгновенно — иначе панель
         # минуты висит пустой; живой темп держим только по валидным барам
         warming = not _history
@@ -194,7 +254,9 @@ async def _player():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _load_session()                   # восстановить результаты прошлой сессии (если есть)
     yield
+    _save_session()                   # сохранить при остановке сервера
     _state["live"] = False
     _state["player"] = False
 
@@ -432,6 +494,7 @@ def state():
             "b": _sym_short(cfg.strategy.symbol_b),
         },
         "timeframe": cfg.strategy.timeframe,  # текущий таймфрейм
+        "paused_by_user": _state["paused_by_user"],  # пауза нажата оператором
         "pending_recommendation": pending,   # ждёт решения оператора
         "position": pos,
         "summary": engine.summary(),
@@ -496,20 +559,29 @@ async def player_start(limit: int = 2000):
     сессии (журнал/сделки/время сохраняются). Свежий старт со сбросом — только когда
     плеера ещё не было или он доигран до конца. Сброс сессии — отдельная кнопка/эндпоинт.
     """
-    global _player_rows
+    global _player_rows, _player_idx
     if _state["player"]:
         return {"ok": True, "already": True}
     _state["live"] = False            # плеер и live взаимоисключаются
+    _state["paused_by_user"] = False  # старт/возобновление снимает флаг паузы
     paused = bool(_player_rows) and _player_idx < len(_player_rows)
     if paused:
         # возобновление: движок и позиция сохранены, продолжаем фоновую подачу баров
         _state["player"] = True
         asyncio.create_task(_player())
         return {"ok": True, "resumed": True}
-    # свежий старт — чистая сессия
-    _reset_engine()
+    # генерируем новые бары для графика
     df = generate_synthetic(n=limit)
-    _player_rows = Engine.rows_from_df(df, cfg.strategy)
+    rows = Engine.rows_from_df(df, cfg.strategy)
+    if _state["session_started"] is None:
+        # сессии ещё не было — свежий старт с чистого листа
+        _reset_engine()
+    else:
+        # сессия есть (восстановлена с диска / доиграл плеер): НЕ сбрасываем результаты,
+        # просто продолжаем график новыми барами — журнал/баланс/время сохраняются
+        _history.clear()
+    _player_rows = rows
+    _player_idx = 0
     _state["player"] = True
     asyncio.create_task(_player())
     return {"ok": True, "bars": len(_player_rows)}
@@ -518,6 +590,7 @@ async def player_start(limit: int = 2000):
 @app.post("/player/stop")
 def player_stop():
     _state["player"] = False
+    _state["paused_by_user"] = True   # намеренная пауза — фронт не возобновляет авто
     return {"ok": True}
 
 
