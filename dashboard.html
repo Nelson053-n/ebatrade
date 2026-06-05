@@ -737,7 +737,14 @@ function render(s){
     mHint.textContent='синтетический генератор (демо)';
     $('chart-title').textContent='Синтетический спред '+A+'/'+B;
   }
-  $('chart-sub').textContent='ln('+A+') − β·ln('+B+') · BB(240, 2σ)';
+  if(s.spread_mode==='cross_pct'){
+    // кросс-биржевой режим: линейный спред + коридор ±band_pct от цены вокруг SMA(200)
+    const pc=((s.band_pct||0.03)*100).toFixed(s.band_pct&&s.band_pct<0.01?1:0);
+    $('chart-sub').textContent='P(BitMEX) − P(OKX) · SMA(200) ±'+pc+'%';
+    $('chart-title').textContent=(s.live?'Кросс-спред — LIVE':'Кросс-спред (демо) ')+A;
+  } else {
+    $('chart-sub').textContent='ln('+A+') − β·ln('+B+') · BB(240, 2σ)';
+  }
   // подсветка активного TF над графиком
   updateTFButtons();
 

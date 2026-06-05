@@ -13,8 +13,18 @@ class StrategyConfig(BaseModel):
     timeframe: str = "5m"
 
     # --- расчёт спреда ---
-    spread_mode: Literal["ratio", "log"] = "log"
+    spread_mode: Literal["ratio", "log", "cross_pct"] = "log"
     beta_window: int = 240               # окно rolling-OLS для динамической беты (log-режим)
+
+    # --- кросс-биржевой режим (cross_pct): один инструмент на двух биржах ---
+    # Спред = P_a − P_b (линейная разница цен одной монеты на двух биржах). Полосы —
+    # фиксированный % от ЦЕНЫ (band_pct·price_a), НЕ от σ и НЕ от |SMA| (SMA спреда ≈ 0,
+    # процент от неё схлопывается). SMA(sma_period) — средняя линия, выход к ней.
+    band_pct: float = 0.03               # полуширина коридора, доля от цены (±3%)
+    sma_period: int = 200                # окно SMA спреда (отдельно от bb_period)
+    exchange_a: str = "bitmex"           # биржа ноги A (для read_ohlcv_cross)
+    exchange_b: str = "okx"              # биржа ноги B
+    symbol_cross: str = "SUI/USDT:USDT"  # единый символ на обеих биржах
 
     # --- индикатор (Боллинджер поверх спреда) ---
     # пресет КОНСЕРВАТИВНЫЙ — лучше обобщается на всех 9 парах (бэктест 6 мес: +66,

@@ -34,6 +34,22 @@ def build_indicators(
     """df: индекс — ts(ms), колонки 'price_a','price_b' (close обеих ног, выровненные)."""
     out = df.copy()
 
+    if cfg.spread_mode == "cross_pct":
+        # кросс-биржевой: линейный спред, полосы = SMA ± band (band = % от ЦЕНЫ актива).
+        # z синтезируем так, что |z|=1 ровно на границе, z=0 на SMA — тогда existing
+        # SignalEngine (entry_z=1.0) даёт вход по пробою, а выход — по возврату z к 0.
+        out["beta"] = 1.0
+        out["spread"] = out["price_a"] - out["price_b"]
+        mid = out["spread"].rolling(cfg.sma_period).mean()
+        band = (cfg.band_pct * out["price_a"]).clip(lower=1e-9)   # абсолют, привязан к цене
+        out["mid"] = mid
+        out["upper"] = mid + band
+        out["lower"] = mid - band
+        out["std"] = band / cfg.bb_k        # псевдо-σ: engine.approve() (upper−mid)/bb_k = band/bb_k
+        out["z"] = (out["spread"] - mid) / band
+        out["width_pct"] = 100.0            # анти-флэт фильтр не применим к кросс-режиму
+        return out
+
     if cfg.spread_mode == "ratio":
         out["beta"] = 1.0
         out["spread"] = out["price_a"] / out["price_b"]

@@ -38,6 +38,25 @@ class SignalEngine:
         # --- управление открытой позицией (авто) ---
         if position is not None:
             d = position.direction
+
+            # кросс-биржевой режим: выход СТРОГО по возврату спреда к SMA (z пересёк 0),
+            # а не по profit-target. short_spread (вошли при z>1) закрываем когда z<=0;
+            # long_spread (z<−1) — когда z>=0. Стоп по z и тайм-стоп сохраняем.
+            if c.spread_mode == "cross_pct":
+                reverted = (d == SpreadDirection.SHORT_SPREAD and row.z <= 0.0) or (
+                    d == SpreadDirection.LONG_SPREAD and row.z >= 0.0
+                )
+                if reverted:
+                    return Recommendation(action=Action.EXIT, reason="возврат к SMA", direction=d, **base)
+                stopped = (d == SpreadDirection.LONG_SPREAD and row.z <= -c.stop_z) or (
+                    d == SpreadDirection.SHORT_SPREAD and row.z >= c.stop_z
+                )
+                if stopped:
+                    return Recommendation(action=Action.STOP, reason="стоп по z", direction=d, **base)
+                if bars_held >= c.max_bars_in_trade:
+                    return Recommendation(action=Action.STOP, reason="тайм-стоп", direction=d, **base)
+                return Recommendation(action=Action.NONE, reason="удержание", direction=d, **base)
+
             # ВЫХОД по ЦЕЛИ ПРИБЫЛИ. Закрываем по возврату, когда нереализованный валовый
             # P&L (по ногам, в β входа) достиг цели = profit_target_fees × round-trip
             # комиссий. Это гарантирует gross ≥ 0 на выходе — устраняет «z вернулся, а

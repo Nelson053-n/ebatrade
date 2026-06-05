@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from .config import AppConfig
-from .data_feed import generate_synthetic, read_ohlcv_ccxt
+from .data_feed import generate_synthetic, generate_synthetic_cross, read_ohlcv_ccxt
 from .engine import Engine
 from .models import IndicatorRow, SpreadDirection, Trade
 
@@ -71,6 +71,14 @@ PRESETS = {
         "desc": "win 65%, net +68: реже фиксирует прибыль, самый стабильный net по периодам",
         "entry_z": 2.5, "stop_z": 8.0, "profit_target_fees": 8.0,
         "bb_period": 240, "min_width_pct": 0.5,
+    },
+    "cross_pct": {
+        "label": "Кросс-биржа SUI (BitMEX/OKX)",
+        "desc": "линейный спред P_bm−P_okx, полосы SMA(200)·(1±3%), выход к SMA",
+        "entry_z": 1.0, "stop_z": 8.0, "profit_target_fees": 6.0,
+        "bb_period": 240, "min_width_pct": 0.0,
+        # cross-специфика (применяется в SlotState._apply_preset):
+        "spread_mode": "cross_pct", "band_pct": 0.03, "sma_period": 200,
     },
 }
 
@@ -130,6 +138,13 @@ class SlotState:
         s.profit_target_fees = p["profit_target_fees"]
         s.bb_period = p["bb_period"]
         s.min_width_pct = p["min_width_pct"]
+        # cross-специфика: применяем, если пресет её задаёт; иначе ВОЗВРАЩАЕМ в log,
+        # чтобы переключение cross_pct → balanced/conservative не залипло в кросс-режиме
+        s.spread_mode = p.get("spread_mode", "log")
+        if "band_pct" in p:
+            s.band_pct = p["band_pct"]
+        if "sma_period" in p:
+            s.sma_period = p["sma_period"]
 
     def reset_engine(self) -> None:
         self.engine = Engine(self.cfg)
@@ -202,9 +217,12 @@ class SlotState:
         (окно bb_period) — то есть beta_window + bb_period; плюс запас на валидные бары.
         """
         s = self.cfg.strategy
-        base = s.bb_period
-        if s.spread_mode == "log":
-            base += s.beta_window
+        if s.spread_mode == "cross_pct":
+            base = s.sma_period               # прогрев только под SMA спреда
+        elif s.spread_mode == "log":
+            base = s.bb_period + s.beta_window
+        else:
+            base = s.bb_period
         return base + 80
 
     def push_history(self, row: IndicatorRow) -> None:
@@ -234,7 +252,7 @@ class SlotState:
 _server_started = time.time()       # момент запуска процесса (uptime сервера, общий)
 SLOTS = [
     SlotState(0, "balanced", ("XRP/USDT:USDT", "ADA/USDT:USDT")),
-    SlotState(1, "conservative", ("SOL/USDT:USDT", "AVAX/USDT:USDT")),
+    SlotState(1, "cross_pct", ("SUI/USDT:USDT", "SUI/USDT:USDT")),
 ]
 
 
@@ -541,6 +559,8 @@ def state(slot: int = 1):
             "b": _sym_short(st.cfg.strategy.symbol_b),
         },
         "timeframe": st.cfg.strategy.timeframe,  # текущий таймфрейм
+        "spread_mode": st.cfg.strategy.spread_mode,  # log | ratio | cross_pct (для подписи графика)
+        "band_pct": st.cfg.strategy.band_pct,        # ширина коридора cross-режима
         "paused_by_user": st.state["paused_by_user"],  # пауза нажата оператором
         "pending_recommendation": pending,   # ждёт решения оператора
         "position": pos,
@@ -621,8 +641,9 @@ async def player_start(limit: int = 2000, slot: int = 1):
         st.state["player"] = True
         asyncio.create_task(_player(st))
         return {"ok": True, "resumed": True}
-    # генерируем новые бары для графика
-    df = generate_synthetic(n=limit)
+    # генерируем новые бары для графика (кросс-режим — своя синтетика двух бирж)
+    gen = generate_synthetic_cross if st.cfg.strategy.spread_mode == "cross_pct" else generate_synthetic
+    df = gen(n=limit)
     rows = Engine.rows_from_df(df, st.cfg.strategy)
     if st.state["session_started"] is None:
         # сессии ещё не было — свежий старт с чистого листа
@@ -652,8 +673,9 @@ def replay_synthetic(limit: int = 2000, slot: int = 1):
     st = _slot(slot)
     st.reset_engine()
     st.cfg.auto_approve = True
+    gen = generate_synthetic_cross if st.cfg.strategy.spread_mode == "cross_pct" else generate_synthetic
     try:
-        for row in Engine.rows_from_df(generate_synthetic(n=limit), st.cfg.strategy):
+        for row in Engine.rows_from_df(gen(n=limit), st.cfg.strategy):
             st.engine.step(row)
             st.push_history(row)
     finally:

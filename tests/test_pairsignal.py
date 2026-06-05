@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pairsignal.config import AppConfig, StrategyConfig
-from pairsignal.data_feed import generate_synthetic
+from pairsignal.data_feed import generate_synthetic, generate_synthetic_cross
 from pairsignal.engine import Engine
 from pairsignal.indicators import build_indicators
 from pairsignal.models import Action, IndicatorRow, SpreadDirection
@@ -144,3 +144,78 @@ def test_summary_keys():
     s = eng.summary()
     for k in ("trades", "win_rate_pct", "net_pnl", "fees_paid", "balance", "equity", "return_pct"):
         assert k in s
+
+
+# --- кросс-биржевой режим cross_pct (BitMEX/OKX) ---
+def _cross_cfg():
+    """StrategyConfig для cross_pct с порогами как в пресете."""
+    c = StrategyConfig()
+    c.spread_mode = "cross_pct"
+    c.band_pct = 0.03
+    c.sma_period = 50          # короче для тестов (меньше прогрев)
+    c.entry_z = 1.0
+    c.min_width_pct = 0.0
+    return c
+
+
+def test_cross_pct_indicators():
+    cfg = _cross_cfg()
+    df = generate_synthetic_cross(n=400)
+    ind = build_indicators(df, cfg)
+    # линейный спред = price_a − price_b, β=1
+    assert (ind["beta"] == 1.0).all()
+    assert abs((ind["spread"] - (df["price_a"] - df["price_b"])).abs().max()) < 1e-9
+    valid = ind.dropna(subset=["mid", "z", "upper", "lower", "std"])
+    assert len(valid) > 0
+    # геометрия полос и псевдо-σ
+    assert (valid["upper"] > valid["mid"]).all()
+    assert (valid["mid"] > valid["lower"]).all()
+    assert (valid["std"] > 0).all()
+    # ширина полосы = band = band_pct·price_a; на границе |z|≈1
+    band = cfg.band_pct * df["price_a"]
+    assert abs((valid["upper"] - valid["mid"] - band.reindex(valid.index)).abs().max()) < 1e-6
+
+
+def test_cross_pct_entry_short_above_band():
+    eng = SignalEngine(_cross_cfg())
+    rec = eng.evaluate(_row(z=1.2, width=100.0), position=None)
+    assert rec.action == Action.ENTER
+    assert rec.direction == SpreadDirection.SHORT_SPREAD   # шорт BitMEX / лонг OKX
+
+
+def test_cross_pct_entry_long_below_band():
+    eng = SignalEngine(_cross_cfg())
+    rec = eng.evaluate(_row(z=-1.2, width=100.0), position=None)
+    assert rec.action == Action.ENTER
+    assert rec.direction == SpreadDirection.LONG_SPREAD    # лонг BitMEX / шорт OKX
+
+
+def test_cross_pct_exit_at_sma():
+    cfg = AppConfig()
+    cfg.strategy = _cross_cfg()
+    cfg.auto_approve = True
+    eng = Engine(cfg)
+    # вошли SHORT_SPREAD (z>1), спред выше коридора
+    eng.step(_row(z=1.2, width=100.0, ts=0))
+    assert eng.exch.position is not None
+    assert eng.exch.position.direction == SpreadDirection.SHORT_SPREAD
+    # спред вернулся к SMA (z<=0) → выход «возврат к SMA»
+    res = eng.step(_row(z=-0.1, width=100.0, ts=300_000))
+    assert res.trade is not None
+    assert res.rec.reason == "возврат к SMA"
+    assert eng.exch.position is None
+
+
+def test_cross_pct_synthetic_has_trades():
+    """Страж РИСКа: коридор ±3% проходим синтетикой → сделки есть, выход к SMA."""
+    cfg = AppConfig()
+    cfg.strategy = _cross_cfg()
+    cfg.strategy.sma_period = 200
+    cfg.auto_approve = True
+    eng = Engine(cfg)
+    for row in Engine.rows_from_df(generate_synthetic_cross(n=2000), cfg.strategy):
+        eng.step(row)
+    s = eng.summary()
+    assert s["trades"] > 0
+    # все закрытые сделки — по возврату к SMA (на синтетике стопов быть не должно)
+    assert all(t.reason == "exit" for t in eng.exch.trades)
