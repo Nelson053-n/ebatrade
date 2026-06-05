@@ -104,11 +104,14 @@ class SlotState:
     не делят мутируемого состояния — общее только read-only константы и _server_started.
     """
 
-    def __init__(self, idx: int, preset_key: str | None = None) -> None:
+    def __init__(self, idx: int, preset_key: str | None = None,
+                 pair: tuple[str, str] | None = None) -> None:
         self.idx = idx                         # 0 | 1 — адрес файла персистентности
         self.cfg = AppConfig()
         if preset_key is not None:
             self._apply_preset(preset_key)     # стартовый пресет слота
+        if pair is not None:                   # стартовая пара слота (чтобы вкладки отличались)
+            self.cfg.strategy.symbol_a, self.cfg.strategy.symbol_b = pair
         self.engine = Engine(self.cfg)
         self.state: dict = {"live": False, "player": False, "last_rec": None,
                             "session_started": None,   # старт текущей торговой сессии
@@ -229,7 +232,10 @@ class SlotState:
 
 
 _server_started = time.time()       # момент запуска процесса (uptime сервера, общий)
-SLOTS = [SlotState(0, "balanced"), SlotState(1, "conservative")]
+SLOTS = [
+    SlotState(0, "balanced", ("XRP/USDT:USDT", "ADA/USDT:USDT")),
+    SlotState(1, "conservative", ("SOL/USDT:USDT", "AVAX/USDT:USDT")),
+]
 
 
 def _slot(slot: int = 1) -> SlotState:
