@@ -60,8 +60,10 @@ header{display:flex;align-items:center;gap:18px;padding-bottom:18px;border-botto
 .brand{font-family:var(--disp);font-weight:700;font-size:20px;letter-spacing:.5px;color:var(--ink)}
 .brand b{color:var(--signal)}
 .tag{font-size:10px;letter-spacing:2px;color:var(--ink-dim);border:1px solid var(--line);padding:3px 8px;border-radius:3px;text-transform:uppercase}
-.stratswitch{display:inline-flex;align-items:stretch;border:1px solid var(--line);border-radius:7px;overflow:hidden}
-.strat-btn{display:flex;align-items:center;justify-content:center;min-width:46px;font-family:var(--disp);font-size:12px;font-weight:600;letter-spacing:.4px;line-height:1;color:var(--ink-dim);background:var(--bg);border:none;padding:6px 14px;cursor:pointer;transition:background .15s,color .15s}
+.stratswitch{display:inline-flex;align-items:stretch;flex:none;border:1px solid var(--line);border-radius:7px}
+.strat-btn{flex:none;display:flex;align-items:center;justify-content:center;font-family:var(--disp);font-size:12px;font-weight:600;letter-spacing:.4px;line-height:1;color:var(--ink-dim);background:var(--bg);border:none;padding:6px 14px;cursor:pointer;transition:background .15s,color .15s}
+.strat-btn:first-child{border-radius:6px 0 0 6px}
+.strat-btn:last-child{border-radius:0 6px 6px 0}
 .strat-btn+.strat-btn{border-left:1px solid var(--line)}
 .strat-btn:hover{color:var(--ink)}
 .strat-btn.active{color:#06140f;background:var(--signal)}
