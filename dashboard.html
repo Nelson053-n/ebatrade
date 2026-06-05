@@ -683,7 +683,7 @@ function render(s){
   const npr=v=>{ v=+v; return v>=1000?v.toFixed(1):v>=1?v.toFixed(3):v.toFixed(5); };  // адаптивная точность цены
   const sideTag=s=>s==='long'?'<span class="dir-long">LONG</span>':'<span class="dir-short">SHORT</span>';
   if(!trades.length){ j.innerHTML='<tr><td colspan="7" class="empty" style="text-align:left">сделок пока нет — ждём первый подтверждённый вход</td></tr>'; }
-  else j.innerHTML=trades.slice(0,8).map(x=>{
+  else j.innerHTML=trades.map(x=>{
     const long=x.direction==='long_spread';
     const legs = (x.a_entry!=null)
       ? `${PA} ${sideTag(x.a_side)} ${npr(x.a_entry)}→${npr(x.a_exit)}<br>${PB} ${sideTag(x.b_side)} ${npr(x.b_entry)}→${npr(x.b_exit)}`
