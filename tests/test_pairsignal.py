@@ -146,11 +146,12 @@ def test_summary_keys():
         assert k in s
 
 
-# --- кросс-биржевой режим cross_pct (BitMEX/OKX) ---
-def _cross_cfg():
-    """StrategyConfig для cross_pct с порогами как в пресете."""
+# --- кросс-биржевой режим cross_pct (gateio/mexc) ---
+def _cross_cfg(band_mode="vol"):
+    """StrategyConfig для cross_pct с порогами как в пресете (дефолт band_mode=vol)."""
     c = StrategyConfig()
     c.spread_mode = "cross_pct"
+    c.band_mode = band_mode
     c.band_pct = 0.03
     c.sma_period = 50          # короче для тестов (меньше прогрев)
     c.entry_z = 1.0
@@ -158,8 +159,8 @@ def _cross_cfg():
     return c
 
 
-def test_cross_pct_indicators():
-    cfg = _cross_cfg()
+def test_cross_pct_indicators_vol():
+    cfg = _cross_cfg("vol")
     df = generate_synthetic_cross(n=400)
     ind = build_indicators(df, cfg)
     # линейный спред = price_a − price_b, β=1
@@ -167,11 +168,24 @@ def test_cross_pct_indicators():
     assert abs((ind["spread"] - (df["price_a"] - df["price_b"])).abs().max()) < 1e-9
     valid = ind.dropna(subset=["mid", "z", "upper", "lower", "std"])
     assert len(valid) > 0
-    # геометрия полос и псевдо-σ
     assert (valid["upper"] > valid["mid"]).all()
     assert (valid["mid"] > valid["lower"]).all()
     assert (valid["std"] > 0).all()
-    # ширина полосы = band = band_pct·price_a; на границе |z|≈1
+    # vol: band = bb_k·σ(спреда); std = σ; на полосе |z|=1
+    sd = df["spread"] if "spread" in df else (df["price_a"] - df["price_b"])
+    sd = sd.rolling(cfg.sma_period).std(ddof=0)
+    band_expected = (cfg.bb_k * sd).reindex(valid.index)
+    assert abs((valid["upper"] - valid["mid"] - band_expected).abs().max()) < 1e-6
+    assert abs((valid["std"] - sd.reindex(valid.index)).abs().max()) < 1e-6
+
+
+def test_cross_pct_indicators_pct():
+    cfg = _cross_cfg("pct")
+    df = generate_synthetic_cross(n=400)
+    ind = build_indicators(df, cfg)
+    valid = ind.dropna(subset=["mid", "z", "upper", "lower", "std"])
+    assert len(valid) > 0
+    # pct: band = band_pct·price_a
     band = cfg.band_pct * df["price_a"]
     assert abs((valid["upper"] - valid["mid"] - band.reindex(valid.index)).abs().max()) < 1e-6
 
@@ -180,14 +194,14 @@ def test_cross_pct_entry_short_above_band():
     eng = SignalEngine(_cross_cfg())
     rec = eng.evaluate(_row(z=1.2, width=100.0), position=None)
     assert rec.action == Action.ENTER
-    assert rec.direction == SpreadDirection.SHORT_SPREAD   # шорт BitMEX / лонг OKX
+    assert rec.direction == SpreadDirection.SHORT_SPREAD   # шорт A(gateio) / лонг B(mexc)
 
 
 def test_cross_pct_entry_long_below_band():
     eng = SignalEngine(_cross_cfg())
     rec = eng.evaluate(_row(z=-1.2, width=100.0), position=None)
     assert rec.action == Action.ENTER
-    assert rec.direction == SpreadDirection.LONG_SPREAD    # лонг BitMEX / шорт OKX
+    assert rec.direction == SpreadDirection.LONG_SPREAD    # лонг A(gateio) / шорт B(mexc)
 
 
 def test_cross_pct_exit_at_sma():
@@ -206,10 +220,10 @@ def test_cross_pct_exit_at_sma():
     assert eng.exch.position is None
 
 
-def test_cross_pct_synthetic_has_trades():
-    """Страж РИСКа: коридор ±3% проходим синтетикой → сделки есть, выход к SMA."""
+def test_cross_pct_synthetic_has_trades_vol():
+    """Страж РИСКа: vol-полосы (bb_k·σ) проходимы синтетикой → сделки есть, выход к SMA."""
     cfg = AppConfig()
-    cfg.strategy = _cross_cfg()
+    cfg.strategy = _cross_cfg("vol")
     cfg.strategy.sma_period = 200
     cfg.auto_approve = True
     eng = Engine(cfg)
@@ -217,5 +231,16 @@ def test_cross_pct_synthetic_has_trades():
         eng.step(row)
     s = eng.summary()
     assert s["trades"] > 0
-    # все закрытые сделки — по возврату к SMA (на синтетике стопов быть не должно)
     assert all(t.reason == "exit" for t in eng.exch.trades)
+
+
+def test_cross_pct_synthetic_has_trades_pct():
+    """pct-режим (фикс. коридор ±3%) тоже проходим синтетикой."""
+    cfg = AppConfig()
+    cfg.strategy = _cross_cfg("pct")
+    cfg.strategy.sma_period = 200
+    cfg.auto_approve = True
+    eng = Engine(cfg)
+    for row in Engine.rows_from_df(generate_synthetic_cross(n=2000), cfg.strategy):
+        eng.step(row)
+    assert eng.summary()["trades"] > 0

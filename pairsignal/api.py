@@ -28,7 +28,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from .config import AppConfig
-from .data_feed import generate_synthetic, generate_synthetic_cross, read_ohlcv_ccxt
+from .data_feed import (
+    generate_synthetic,
+    generate_synthetic_cross,
+    read_ohlcv_ccxt,
+    read_ohlcv_cross,
+)
 from .engine import Engine
 from .models import IndicatorRow, SpreadDirection, Trade
 
@@ -73,12 +78,12 @@ PRESETS = {
         "bb_period": 240, "min_width_pct": 0.5,
     },
     "cross_pct": {
-        "label": "Кросс-биржа SUI (BitMEX/OKX)",
-        "desc": "линейный спред P_bm−P_okx, полосы SMA(200)·(1±3%), выход к SMA",
+        "label": "Кросс-биржа SUI (gateio/mexc)",
+        "desc": "линейный спред gateio−mexc, адаптивные полосы bb_k·σ(спреда), SMA(200), выход к SMA",
         "entry_z": 1.0, "stop_z": 8.0, "profit_target_fees": 6.0,
         "bb_period": 240, "min_width_pct": 0.0,
         # cross-специфика (применяется в SlotState._apply_preset):
-        "spread_mode": "cross_pct", "band_pct": 0.03, "sma_period": 200,
+        "spread_mode": "cross_pct", "band_mode": "vol", "band_pct": 0.03, "sma_period": 200,
     },
 }
 
@@ -141,6 +146,8 @@ class SlotState:
         # cross-специфика: применяем, если пресет её задаёт; иначе ВОЗВРАЩАЕМ в log,
         # чтобы переключение cross_pct → balanced/conservative не залипло в кросс-режиме
         s.spread_mode = p.get("spread_mode", "log")
+        if "band_mode" in p:
+            s.band_mode = p["band_mode"]
         if "band_pct" in p:
             s.band_pct = p["band_pct"]
         if "sma_period" in p:
@@ -218,7 +225,8 @@ class SlotState:
         """
         s = self.cfg.strategy
         if s.spread_mode == "cross_pct":
-            base = s.sma_period               # прогрев только под SMA спреда
+            # запас ×1.5: после inner-join свечей двух бирж общих баров меньше, чем тянули
+            return int(s.sma_period * 1.5) + 80
         elif s.spread_mode == "log":
             base = s.bb_period + s.beta_window
         else:
@@ -263,6 +271,11 @@ def _slot(slot: int = 1) -> SlotState:
     return SLOTS[slot - 1]
 
 
+def _reader_for(cfg):
+    """Источник реальных котировок по режиму: cross_pct → две биржи, иначе одна биржа."""
+    return read_ohlcv_cross if cfg.strategy.spread_mode == "cross_pct" else read_ohlcv_ccxt
+
+
 async def _poller(st: SlotState):
     """Live-режим на РЕАЛЬНЫХ данных MEXC (no repaint).
 
@@ -275,7 +288,7 @@ async def _poller(st: SlotState):
     while st.state["live"]:
         try:
             # CCXT блокирующий — в пул потоков, чтобы не вешать event loop
-            df = await asyncio.to_thread(read_ohlcv_ccxt, st.cfg.strategy, st.warmup_limit())
+            df = await asyncio.to_thread(_reader_for(st.cfg), st.cfg.strategy, st.warmup_limit())
             rows = Engine.rows_from_df(df, st.cfg.strategy)[:-1]   # без формирующегося бара
             new = [r for r in rows if r.ts > st.last_live_ts]
             for r in new:
@@ -418,9 +431,9 @@ async def analyze(period: str = "day", slot: int = 1):
     limit = st.warmup_limit() + window          # прогрев + окно анализа
 
     try:
-        df = await asyncio.to_thread(read_ohlcv_ccxt, st.cfg.strategy, limit)
+        df = await asyncio.to_thread(_reader_for(st.cfg), st.cfg.strategy, limit)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"не удалось получить историю MEXC: {e}")
+        raise HTTPException(502, f"не удалось получить историю: {e}")
 
     sim_cfg = AppConfig(**st.cfg.model_dump())
     sim_cfg.auto_approve = True                 # считаем все входы
@@ -560,7 +573,13 @@ def state(slot: int = 1):
         },
         "timeframe": st.cfg.strategy.timeframe,  # текущий таймфрейм
         "spread_mode": st.cfg.strategy.spread_mode,  # log | ratio | cross_pct (для подписи графика)
-        "band_pct": st.cfg.strategy.band_pct,        # ширина коридора cross-режима
+        "band_mode": st.cfg.strategy.band_mode,      # pct | vol (для подписи cross)
+        "band_pct": st.cfg.strategy.band_pct,        # ширина коридора cross-режима (pct)
+        "bb_k": st.cfg.strategy.bb_k,                # множитель σ для полос (vol)
+        "sma_period": st.cfg.strategy.sma_period,    # окно SMA/σ cross-режима
+        "exchange_a": st.cfg.strategy.exchange_a,    # биржа ноги A (cross)
+        "exchange_b": st.cfg.strategy.exchange_b,    # биржа ноги B (cross)
+        "symbol_cross": st.cfg.strategy.symbol_cross,
         "paused_by_user": st.state["paused_by_user"],  # пауза нажата оператором
         "pending_recommendation": pending,   # ждёт решения оператора
         "position": pos,

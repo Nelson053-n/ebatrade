@@ -738,10 +738,14 @@ function render(s){
     $('chart-title').textContent='Синтетический спред '+A+'/'+B;
   }
   if(s.spread_mode==='cross_pct'){
-    // кросс-биржевой режим: линейный спред + коридор ±band_pct от цены вокруг SMA(200)
-    const pc=((s.band_pct||0.03)*100).toFixed(s.band_pct&&s.band_pct<0.01?1:0);
-    $('chart-sub').textContent='P(BitMEX) − P(OKX) · SMA(200) ±'+pc+'%';
-    $('chart-title').textContent=(s.live?'Кросс-спред — LIVE':'Кросс-спред (демо) ')+A;
+    // кросс-биржевой режим: линейный спред между двумя биржами вокруг SMA.
+    // vol — адаптивные полосы N·σ(спреда); pct — фиксированный коридор ±band_pct.
+    const exA=(s.exchange_a||'A'), exB=(s.exchange_b||'B'), sma=s.sma_period||200;
+    let bands;
+    if(s.band_mode==='vol'){ bands='полосы '+(s.bb_k||2)+'·σ'; }
+    else { const pc=((s.band_pct||0.03)*100).toFixed(s.band_pct&&s.band_pct<0.01?1:0); bands='±'+pc+'%'; }
+    $('chart-sub').textContent='P('+exA+') − P('+exB+') · SMA('+sma+') · '+bands;
+    $('chart-title').textContent=(s.live?'Кросс-спред '+A+' — LIVE':'Кросс-спред '+A+' (демо)');
   } else {
     $('chart-sub').textContent='ln('+A+') − β·ln('+B+') · BB(240, 2σ)';
   }

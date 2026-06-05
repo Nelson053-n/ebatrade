@@ -35,17 +35,23 @@ def build_indicators(
     out = df.copy()
 
     if cfg.spread_mode == "cross_pct":
-        # кросс-биржевой: линейный спред, полосы = SMA ± band (band = % от ЦЕНЫ актива).
-        # z синтезируем так, что |z|=1 ровно на границе, z=0 на SMA — тогда existing
-        # SignalEngine (entry_z=1.0) даёт вход по пробою, а выход — по возврату z к 0.
+        # кросс-биржевой: линейный спред, полосы = SMA ± band. z нормирован так, что
+        # |z|=1 ровно на полосе, z=0 на SMA — existing SignalEngine (entry_z=1.0) даёт
+        # вход по пробою, выход — по возврату z к 0. band — два режима (см. config):
+        #   vol: bb_k·σ(спреда) — адаптивно (реальные данные); pct: band_pct·price (демо).
         out["beta"] = 1.0
         out["spread"] = out["price_a"] - out["price_b"]
         mid = out["spread"].rolling(cfg.sma_period).mean()
-        band = (cfg.band_pct * out["price_a"]).clip(lower=1e-9)   # абсолют, привязан к цене
+        if cfg.band_mode == "vol":
+            sd = out["spread"].rolling(cfg.sma_period).std(ddof=0)
+            band = (cfg.bb_k * sd).clip(lower=1e-9)
+            out["std"] = sd                  # настоящая σ спреда (для approve/стопа)
+        else:  # pct
+            band = (cfg.band_pct * out["price_a"]).clip(lower=1e-9)
+            out["std"] = band / cfg.bb_k     # псевдо-σ: (upper−mid)/bb_k = band/bb_k
         out["mid"] = mid
         out["upper"] = mid + band
         out["lower"] = mid - band
-        out["std"] = band / cfg.bb_k        # псевдо-σ: engine.approve() (upper−mid)/bb_k = band/bb_k
         out["z"] = (out["spread"] - mid) / band
         out["width_pct"] = 100.0            # анти-флэт фильтр не применим к кросс-режиму
         return out
