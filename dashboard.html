@@ -60,6 +60,11 @@ header{display:flex;align-items:center;gap:18px;padding-bottom:18px;border-botto
 .brand{font-family:var(--disp);font-weight:700;font-size:20px;letter-spacing:.5px;color:var(--ink)}
 .brand b{color:var(--signal)}
 .tag{font-size:10px;letter-spacing:2px;color:var(--ink-dim);border:1px solid var(--line);padding:3px 8px;border-radius:3px;text-transform:uppercase}
+.stratswitch{display:flex;gap:0;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.strat-btn{font-family:var(--disp);font-size:12px;font-weight:600;letter-spacing:.4px;color:var(--ink-dim);background:var(--bg);border:none;padding:6px 14px;cursor:pointer;transition:.15s}
+.strat-btn+.strat-btn{border-left:1px solid var(--line)}
+.strat-btn:hover{color:var(--ink)}
+.strat-btn.active{color:#06140f;background:var(--signal);box-shadow:var(--glow) var(--signal)}
 .pair{margin-left:6px;font-family:var(--disp);font-weight:600;font-size:15px;letter-spacing:.5px}
 .pair span{color:var(--ink-faint)}
 .spacer{flex:1}
@@ -231,6 +236,10 @@ tr:hover td{background:rgba(255,255,255,.015)}
 <div class="wrap">
   <header class="fade">
     <div class="brand">eba<b>trade</b></div>
+    <div class="stratswitch" id="stratSwitch">
+      <button class="strat-btn" data-slot="1">Стратегия 1</button>
+      <button class="strat-btn" data-slot="2">Стратегия 2</button>
+    </div>
     <div class="tag">phase 1 · paper</div>
     <div class="pair" id="hdr-pair">BTC <span>÷</span> ETH</div>
     <div class="spacer"></div>
@@ -450,15 +459,18 @@ tr:hover td{background:rgba(255,255,255,.015)}
 /* ===== ПОДКЛЮЧЕНИЕ К BACKEND (api.py) ===== */
 const API = '';                      // тот же origin, что и панель
 const POLL_MS = 700;                 // период опроса /state
+let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v===1||v===2)?v:1; }catch(e){ return 1; } })();
 let cfg = { entry_z:2.0, exit_z:0.2, stop_z:3.5, min_width_pct:2.0, risk_pct:2.0 };
 let snap = null;                     // последний ответ /state
 
 const $=id=>document.getElementById(id);
 function fmt(n,d=2){return (n>=0?'+':'')+(+n).toFixed(d);}
 async function api(path, method='GET', body=null){
+  const sep = path.includes('?') ? '&' : '?';
+  const url = API + path + sep + 'slot=' + SLOT;   // все запросы привязаны к активному слоту
   const opt = {method};
   if(body!==null){ opt.headers={'Content-Type':'application/json'}; opt.body=JSON.stringify(body); }
-  const r = await fetch(API+path, opt);
+  const r = await fetch(url, opt);
   if(!r.ok){ let d=''; try{d=(await r.json()).detail||'';}catch(e){} throw new Error(d||(path+' → '+r.status)); }
   return r.json();
 }
@@ -1069,9 +1081,14 @@ function tickSession(){
 }
 setInterval(tickSession, 1000);
 
-/* ===== СТАРТ ===== */
-resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
-(async()=>{
+/* ===== ПЕРЕКЛЮЧАТЕЛЬ СТРАТЕГИЙ (слоты 1/2) ===== */
+function markSlot(){
+  $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
+    b.classList.toggle('active', +b.dataset.slot===SLOT);
+  });
+}
+// загрузить конфиг/пары/пресеты/тф и подключиться к сессии активного слота
+async function initSession(){
   try{ fillParams(await api('/config')); }catch(e){}
   await loadPairs();
   await loadPresets();
@@ -1097,7 +1114,26 @@ resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
       $('btnPause').textContent = flowing ? '❚❚ пауза потока' : '▶ запустить поток';
     }
   }catch(e){}
-  poll(); setInterval(poll, POLL_MS);
+  poll();
+}
+async function switchSlot(n){
+  if(n===SLOT) return;
+  SLOT=n; try{ localStorage.setItem('slot', String(n)); }catch(e){}
+  markSlot();
+  // сбросить локальный кэш отображения — у нового слота свой график/таймфрейм/зум
+  snap=null; _chartTF=null; resetZoom();
+  await initSession();
+}
+$('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
+  b.onclick=()=>switchSlot(+b.dataset.slot);
+});
+
+/* ===== СТАРТ ===== */
+resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
+(async()=>{
+  markSlot();
+  await initSession();
+  setInterval(poll, POLL_MS);
 })();
 </script>
 </body>
