@@ -146,6 +146,10 @@ button:disabled{opacity:.25;cursor:not-allowed;transform:none}
 
 /* journal */
 .journal{margin-top:18px}
+.jscroll{max-height:360px;overflow-y:auto}                 /* прокрутка журнала, не растягивает страницу */
+.jscroll::-webkit-scrollbar{width:8px}
+.jscroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+.jscroll table thead th{position:sticky;top:0;background:var(--panel);z-index:1}  /* липкий заголовок */
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;font-size:9px;letter-spacing:1.5px;color:var(--ink-faint);text-transform:uppercase;padding:8px 10px;border-bottom:1px solid var(--line);font-weight:500}
 td{padding:9px 10px;border-bottom:1px solid var(--line)}
@@ -334,11 +338,13 @@ tr:hover td{background:rgba(255,255,255,.015)}
 
   <!-- JOURNAL -->
   <div class="panel journal fade" style="animation-delay:.3s">
-    <h2>Журнал виртуальных сделок</h2>
+    <h2>Журнал виртуальных сделок <em id="j-count"></em></h2>
+    <div class="jscroll">
     <table>
       <thead><tr><th>время</th><th>направление</th><th>ноги: цена входа → выхода</th><th>вход z</th><th>выход z</th><th>net P&L</th><th>причина</th></tr></thead>
       <tbody id="journal"><tr><td colspan="7" class="empty" style="text-align:left">сделок пока нет — ждём первый подтверждённый вход</td></tr></tbody>
     </table>
+    </div>
   </div>
 
   <div class="controls">
@@ -680,6 +686,7 @@ function render(s){
   const trades=(s.trades||[]).slice().reverse();
   const PA=(s.pair&&s.pair.a)||'A', PB=(s.pair&&s.pair.b)||'B';
   const j=$('journal');
+  $('j-count').textContent = trades.length ? ('всего '+trades.length) : '';
   const npr=v=>{ v=+v; return v>=1000?v.toFixed(1):v>=1?v.toFixed(3):v.toFixed(5); };  // адаптивная точность цены
   const sideTag=s=>s==='long'?'<span class="dir-long">LONG</span>':'<span class="dir-short">SHORT</span>';
   if(!trades.length){ j.innerHTML='<tr><td colspan="7" class="empty" style="text-align:left">сделок пока нет — ждём первый подтверждённый вход</td></tr>'; }
