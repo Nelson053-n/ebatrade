@@ -241,6 +241,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <div class="stratswitch" id="stratSwitch">
       <button class="strat-btn" data-slot="1">st1</button>
       <button class="strat-btn" data-slot="2">st2</button>
+      <button class="strat-btn" data-slot="3">st3</button>
     </div>
     <div class="tag">phase 1 · paper</div>
     <div class="pair" id="hdr-pair">BTC <span>÷</span> ETH</div>
@@ -252,6 +253,74 @@ tr:hover td{background:rgba(255,255,255,.015)}
     <button class="theme-toggle" id="btnStrat"><span class="ic">ⓘ</span> о стратегии</button>
     <button class="theme-toggle" id="themeToggle"><span class="ic">◐</span> <span id="themeLabel">тёмная</span></button>
   </header>
+
+  <!-- ST3: momentum (cross-sectional) — отдельная панель, скрыта по умолчанию -->
+  <div id="st3panel" style="display:none">
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2>st3 · Cross-Sectional Momentum <em>тренд-следование, доллар-нейтраль</em></h2>
+      <div style="font-size:13px;line-height:1.75;color:var(--ink-dim)">
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Идея.</b> В отличие от st1/st2 (mean-reversion — ставка на <i>возврат</i> спреда к среднему), momentum ставит на <i>продолжение</i> относительного тренда. Крипта исторически трендова — это другой класс edge.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Механика.</b> Каждые <code>holding</code> часов ранжируем топ-30 ликвидных монет по доходности за прошлые <code>lookback</code> закрытых баров. Лонгуем <code>k</code> лидеров, шортим <code>k</code> аутсайдеров, равный нотионал — портфель доллар-нейтрален (зарабатывает на относительной силе, не на направлении рынка).</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Честность.</b> Параметры (lookback/holding) подбираются на train-окне по Sharpe, прогон — на следующем невиданном test-окне (walk-forward, no look-ahead). Индикаторы только по закрытым барам (no repaint).</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Издержки и риск.</b> Учитываются комиссия и проскальзывание на оборот при каждом ребалансе. Главный риск — momentum crash: резкие просадки на развороте тренда (см. maxDD). Стратегия выживает при тейкерных издержках — в отличие от кросс-биржевого арбитража st2.</p>
+        <p style="margin:0;color:var(--ink-faint)"><b>⚠ Paper, без реальных ордеров (Phase 1).</b> Цифры бэктеста/сравнения — по close-ценам без модели стакана, это верхняя граница. Честный показатель — live forward-test ниже, он копится медленно.</p>
+      </div>
+    </div>
+
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2>Ежедневная сводка <button class="ctrl-btn" id="btnDaily" style="float:right">↻ обновить</button></h2>
+      <div id="daily-text" style="font-size:13px;line-height:1.7;white-space:pre-line;color:var(--ink-dim);margin-bottom:10px">—</div>
+      <div class="jscroll" style="max-height:240px"><table id="daily-table">
+        <thead><tr><th>дата</th><th>equity</th><th>Δ за день</th><th>ребалансов</th></tr></thead>
+        <tbody></tbody></table></div>
+    </div>
+
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2>Momentum · live forward-test <em id="m-live-status">—</em></h2>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <div>equity <b id="m-equity" style="font-size:20px">—</b>
+          <span id="m-return" style="margin-left:8px"></span></div>
+        <div style="color:var(--ink-dim);font-size:12px" id="m-params">—</div>
+      </div>
+      <div style="margin-bottom:10px"><span id="m-longs"></span> <span id="m-shorts"></span></div>
+      <canvas id="mEquity" style="width:100%;height:200px"></canvas>
+      <div class="jscroll" style="max-height:160px;margin-top:8px"><table id="m-rebals">
+        <thead><tr><th>время</th><th>equity</th><th>оборот</th><th>лонг</th><th>шорт</th></tr></thead>
+        <tbody></tbody></table></div>
+    </div>
+
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2>Walk-forward бэктест</h2>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+        <div class="fld"><label>монет</label><input id="bt-top" type="number" value="12" min="6" style="width:70px"></div>
+        <div class="fld"><label>дней</label><input id="bt-days" type="number" value="90" min="30" style="width:70px"></div>
+        <div class="fld"><label>k</label><input id="bt-k" type="number" value="3" min="1" style="width:50px"></div>
+        <div class="fld"><label>ТФ</label><select id="bt-tf"><option>1h</option><option>4h</option></select></div>
+        <button class="ctrl-btn approve" id="btnBacktest">▶ прогнать</button>
+        <span class="hint" id="bt-msg"></span>
+      </div>
+      <canvas id="btEquity" style="width:100%;height:180px"></canvas>
+      <div class="jscroll" style="max-height:180px;margin-top:8px"><table id="bt-windows">
+        <thead><tr><th>окно</th><th>lookback</th><th>holding</th><th>return%</th><th>Sharpe</th><th>maxDD%</th></tr></thead>
+        <tbody></tbody></table></div>
+    </div>
+
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2>Сравнение стратегий <em>Momentum · Pairs · Buy&Hold</em></h2>
+      <div style="margin-bottom:10px">
+        <button class="ctrl-btn approve" id="btnCompare">▶ сравнить</button>
+        <span class="hint" id="cmp-msg"></span>
+      </div>
+      <canvas id="cmpChart" style="width:100%;height:200px"></canvas>
+      <div id="cmp-legend" style="margin-top:8px;font-size:13px"></div>
+    </div>
+
+    <div class="panel fade">
+      <h2>Юнит-тесты momentum</h2>
+      <button class="ctrl-btn" id="btnMTests">▶ запустить тесты</button>
+      <span id="m-tests-badge" style="margin-left:12px;font-weight:600"></span>
+    </div>
+  </div>
 
   <div class="grid">
     <!-- LEFT: chart + indicators -->
@@ -461,7 +530,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
 /* ===== ПОДКЛЮЧЕНИЕ К BACKEND (api.py) ===== */
 const API = '';                      // тот же origin, что и панель
 const POLL_MS = 700;                 // период опроса /state
-let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v===1||v===2)?v:1; }catch(e){ return 1; } })();
+let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v===1||v===2||v===3)?v:1; }catch(e){ return 1; } })();
 let cfg = { entry_z:2.0, exit_z:0.2, stop_z:3.5, min_width_pct:2.0, risk_pct:2.0 };
 let snap = null;                     // последний ответ /state
 
@@ -1099,6 +1168,10 @@ function markSlot(){
   $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
     b.classList.toggle('active', +b.dataset.slot===SLOT);
   });
+  // st3 (momentum) — отдельная панель; прячем парный layout и наоборот
+  const isM = SLOT===3;
+  document.querySelectorAll('.grid').forEach(g=> g.style.display = isM ? 'none' : '');
+  $('st3panel').style.display = isM ? '' : 'none';
 }
 // загрузить конфиг/пары/пресеты/тф и подключиться к сессии активного слота
 async function initSession(){
@@ -1135,18 +1208,142 @@ async function switchSlot(n){
   markSlot();
   // сбросить локальный кэш отображения — у нового слота свой график/таймфрейм/зум
   snap=null; _chartTF=null; resetZoom();
+  if(n===3){ momInit(); return; }
   await initSession();
 }
 $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
   b.onclick=()=>switchSlot(+b.dataset.slot);
 });
 
+/* ===== ST3: MOMENTUM ===== */
+// простой equity-рендер на canvas (несколько линий, автошкала) — в стиле draw()
+function drawEquity(cv, series, colors){
+  const r=cv.getBoundingClientRect();
+  // canvas внутри только что показанной вкладки может быть ещё без layout (height 0) —
+  // откладываем рендер до следующего кадра, иначе график «пустой»
+  if(r.width<5 || r.height<5){ requestAnimationFrame(()=>drawEquity(cv,series,colors)); return; }
+  const dpr=devicePixelRatio||1;
+  cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width, H=r.height; ctx.clearRect(0,0,W,H);
+  const all=[].concat(...series.map(s=>s.pts.map(p=>p.v)));
+  if(!all.length){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px sans-serif'; ctx.fillText('нет данных',10,20); return; }
+  let lo=Math.min(...all), hi=Math.max(...all); const pad=(hi-lo)*0.1||0.01; lo-=pad; hi+=pad;
+  const n=Math.max(...series.map(s=>s.pts.length));
+  const x=i=>10+(W-20)*(n>1?i/(n-1):0.5), y=v=>H-18-(H-28)*((v-lo)/(hi-lo));
+  // линия 1.0 (старт)
+  ctx.strokeStyle=getCSS('--ink-faint'); ctx.setLineDash([3,3]); ctx.beginPath();
+  ctx.moveTo(10,y(1)); ctx.lineTo(W-10,y(1)); ctx.stroke(); ctx.setLineDash([]);
+  series.forEach((s,si)=>{
+    const col=colors[si%colors.length];
+    ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=1.6;
+    if(s.pts.length>1){
+      ctx.beginPath();
+      s.pts.forEach((p,i)=>{ const xx=x(i),yy=y(p.v); i?ctx.lineTo(xx,yy):ctx.moveTo(xx,yy); });
+      ctx.stroke();
+    }
+    // маркеры точек — чтобы 1 точка тоже была видна
+    if(s.pts.length<=40){
+      s.pts.forEach((p,i)=>{ ctx.beginPath(); ctx.arc(x(i),y(p.v),s.pts.length===1?4:2.5,0,7); ctx.fill(); });
+    }
+  });
+  ctx.fillStyle=getCSS('--ink-dim'); ctx.font='10px monospace';
+  ctx.fillText(hi.toFixed(2),2,12); ctx.fillText(lo.toFixed(2),2,H-4);
+}
+function getCSS(v){ return getComputedStyle(document.documentElement).getPropertyValue(v)||'#888'; }
+const MOM_COLORS=['#2ee6a6','#e6a02e','#6a8cff'];
+
+let _momTimer=null;
+async function momState(){
+  try{
+    const s=await fetch(API+'/momentum/state').then(r=>r.json());
+    if(!s.running && !s.equity){ $('m-live-status').textContent='не запущен'; return; }
+    $('m-live-status').textContent = s.running ? '🟢 активен' : '⚪ остановлен';
+    $('m-equity').textContent = '$'+(s.equity??0).toFixed(2);
+    const ret=s.return_pct??0;
+    $('m-return').textContent=(ret>=0?'+':'')+ret.toFixed(2)+'%';
+    $('m-return').style.color = ret>=0?'var(--signal)':'#ff6b6b';
+    const m=s.meta||{};
+    $('m-params').textContent=`lookback=${m.lookback} holding=${m.holding} k=${m.k}`;
+    $('m-longs').innerHTML='<b style="color:var(--signal)">ЛОНГ:</b> '+((s.longs||[]).join(', ')||'—');
+    $('m-shorts').innerHTML=' &nbsp; <b style="color:#ff6b6b">ШОРТ:</b> '+((s.shorts||[]).join(', ')||'—');
+    const rb=s.rebalances||[];
+    drawEquity($('mEquity'), [{pts: rb.map(x=>({v:x.equity/(s.start_equity||1000)}))}], MOM_COLORS);
+    const tb=$('m-rebals').querySelector('tbody'); tb.innerHTML='';
+    rb.slice().reverse().slice(0,20).forEach(x=>{
+      const t=new Date(x.ts).toISOString().slice(5,16).replace('T',' ');
+      tb.insertAdjacentHTML('beforeend',`<tr><td>${t}</td><td>$${x.equity.toFixed(2)}</td><td>${x.turnover.toFixed(2)}</td><td>${(x.longs||[]).map(s=>s.split('/')[0]).join(',')}</td><td>${(x.shorts||[]).map(s=>s.split('/')[0]).join(',')}</td></tr>`);
+    });
+  }catch(e){ $('m-live-status').textContent='ошибка чтения'; }
+}
+async function momDaily(){
+  try{
+    const d=await fetch(API+'/momentum/daily').then(r=>r.json());
+    $('daily-text').textContent=d.text||'—';
+    const tb=$('daily-table').querySelector('tbody'); tb.innerHTML='';
+    (d.days||[]).slice().reverse().forEach(x=>{
+      const col=x.change_pct>=0?'var(--signal)':'#ff6b6b';
+      tb.insertAdjacentHTML('beforeend',`<tr><td>${x.date}</td><td>$${x.equity.toFixed(2)}</td><td style="color:${col}">${x.change_pct>=0?'+':''}${x.change_pct}%</td><td>${x.rebals}</td></tr>`);
+    });
+    if(!(d.days||[]).length) tb.innerHTML='<tr><td colspan="4" style="color:var(--ink-dim)">пока нет завершённых дней</td></tr>';
+  }catch(e){ $('daily-text').textContent='ошибка загрузки сводки'; }
+}
+$('btnDaily').onclick=momDaily;
+let _momLoaded=false;  // тяжёлые бэктест/сравнение автозапускаем один раз за сессию
+function momInit(){
+  momState(); momDaily();
+  if(!_momLoaded){
+    _momLoaded=true;
+    // автозагрузка тяжёлых блоков (грузят историю с биржи; кэшируются на бэке)
+    $('btnCompare').click();
+    $('btnBacktest').click();
+  }
+  if(_momTimer) clearInterval(_momTimer);
+  _momTimer=setInterval(()=>{ if(SLOT===3){ momState(); momDaily(); } }, 30000);
+}
+$('btnBacktest').onclick=async()=>{
+  const q=`top=${+$('bt-top').value}&days=${+$('bt-days').value}&k=${+$('bt-k').value}&timeframe=${$('bt-tf').value}`;
+  $('bt-msg').textContent='загрузка истории и прогон… (до минуты)';
+  try{
+    const d=await fetch(API+'/momentum/backtest?'+q).then(r=>r.json());
+    if(d.error){ $('bt-msg').textContent=d.error; return; }
+    $('bt-msg').textContent=`OOS return ${d.total_return_pct>=0?'+':''}${d.total_return_pct}% · окон ${d.wins}/${d.n} в плюс`;
+    drawEquity($('btEquity'),[{pts:d.equity.map(p=>({v:p.v}))}],MOM_COLORS);
+    const tb=$('bt-windows').querySelector('tbody'); tb.innerHTML='';
+    d.windows.forEach(w=>{
+      const t=new Date(w.test_start).toISOString().slice(0,10)+'…'+new Date(w.test_end).toISOString().slice(5,10);
+      tb.insertAdjacentHTML('beforeend',`<tr><td>${t}</td><td>${w.lookback}</td><td>${w.holding}</td><td style="color:${w.oos_return_pct>=0?'var(--signal)':'#ff6b6b'}">${w.oos_return_pct}</td><td>${w.oos_sharpe}</td><td>${w.oos_max_dd_pct}</td></tr>`);
+    });
+  }catch(e){ $('bt-msg').textContent='ошибка: '+e; }
+};
+$('btnCompare').onclick=async()=>{
+  $('cmp-msg').textContent='прогон трёх стратегий…';
+  try{
+    const d=await fetch(API+'/momentum/compare?top=20&days=180&timeframe=1h').then(r=>r.json());
+    const names=Object.keys(d.curves);
+    const series=names.map(n=>({pts:d.curves[n].map(p=>({v:p.v}))}));
+    drawEquity($('cmpChart'),series,MOM_COLORS);
+    $('cmp-legend').innerHTML=names.map((n,i)=>`<span style="color:${MOM_COLORS[i]}">■</span> ${n}: ${d.returns[n]>=0?'+':''}${d.returns[n]}%`).join(' &nbsp; ');
+    $('cmp-msg').textContent='';
+  }catch(e){ $('cmp-msg').textContent='ошибка: '+e; }
+};
+$('btnMTests').onclick=async()=>{
+  $('m-tests-badge').textContent='запуск…';
+  try{
+    const d=await fetch(API+'/momentum/tests').then(r=>r.json());
+    $('m-tests-badge').innerHTML = d.ok
+      ? `<span style="color:var(--signal)">✓ ${d.passed} passed</span>`
+      : `<span style="color:#ff6b6b">${d.passed} passed / ${d.failed} failed</span>`;
+  }catch(e){ $('m-tests-badge').textContent='ошибка'; }
+};
+
 /* ===== СТАРТ ===== */
 resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
 (async()=>{
   markSlot();
-  await initSession();
-  setInterval(poll, POLL_MS);
+  if(SLOT===3){ momInit(); }
+  else { await initSession(); }
+  setInterval(()=>{ if(SLOT!==3) poll(); }, POLL_MS);
 })();
 </script>
 </body>

@@ -18,3 +18,9 @@ infra/
 # рантайм-состояние сессии (не коммитим)
 session_state.json
 session_state_*.json
+
+# результаты прогонов и live-состояние momentum (рантайм-артефакты)
+pairsignal/out/
+
+# служебные файлы Claude
+.claude/

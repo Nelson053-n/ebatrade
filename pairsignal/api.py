@@ -700,3 +700,182 @@ def replay_synthetic(limit: int = 2000, slot: int = 1):
     finally:
         st.cfg.auto_approve = False
     return st.engine.summary()
+
+
+# ============================================================================
+# st3 — momentum (cross-sectional). Отдельная стратегия, НЕ через SlotState:
+# портфельная (2k ног), векторная. Эндпоинты read-only + on-demand бэктест.
+# ============================================================================
+
+_MOM_STATE = _BASE / "pairsignal" / "out" / "momentum_fwd.json"
+_MOM_CACHE: dict[str, dict] = {}  # кэш тяжёлых бэктестов/сравнений по ключу параметров
+
+
+@app.get("/momentum/state")
+def momentum_state():
+    """Состояние live forward-test портфеля (читает momentum_fwd.json). Не падает без файла."""
+    from .momentum import START_EQUITY, load_state
+
+    loaded = load_state(_MOM_STATE)
+    if loaded is None:
+        return {"running": False}
+    port, meta = loaded
+    longs = sorted(s for s, w in port.weights.items() if w > 0)
+    shorts = sorted(s for s, w in port.weights.items() if w < 0)
+    # «жив» — если последняя отметка свежее 2 типичных интервалов бара (грубо, по last_ts)
+    fresh = bool(port.last_ts) and (time.time() * 1000 - port.last_ts) < 3 * 3600_000
+    return _clean({
+        "running": fresh,
+        "equity": round(port.equity, 2),
+        "return_pct": round((port.equity / START_EQUITY - 1.0) * 100, 2),
+        "start_equity": START_EQUITY,
+        "meta": meta,
+        "longs": [s.split("/")[0] for s in longs],
+        "shorts": [s.split("/")[0] for s in shorts],
+        "last_ts": port.last_ts,
+        "rebalances": port.rebalances[-50:],  # последние 50 для графика/журнала
+    })
+
+
+@app.get("/momentum/daily")
+def momentum_daily():
+    """Ежедневная сводка: текущий статус + агрегация ребалансов по дням (для вкладки st3)."""
+    from datetime import datetime, timezone
+
+    from .momentum import START_EQUITY, load_state
+
+    loaded = load_state(_MOM_STATE)
+    if loaded is None:
+        return {"running": False, "text": "Нет состояния — forward-test ещё не запускался.",
+                "days": []}
+    port, meta = loaded
+    active = (time.time() * 1000 - port.last_ts) < 3 * 3600_000 if port.last_ts else False
+    ret = (port.equity / START_EQUITY - 1.0) * 100
+    longs = ", ".join(s.split("/")[0] for s, w in port.weights.items() if w > 0) or "—"
+    shorts = ", ".join(s.split("/")[0] for s, w in port.weights.items() if w < 0) or "—"
+
+    def _d(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    last_reb = _d(port.rebalances[-1]["ts"]) + " " + datetime.fromtimestamp(
+        port.rebalances[-1]["ts"] / 1000, tz=timezone.utc).strftime("%H:%M") if port.rebalances else "—"
+    text = (
+        f"{'🟢 активен' if active else '🔴 остановлен'} · "
+        f"equity ${port.equity:.2f} ({'+' if ret >= 0 else ''}{ret:.2f}%) · "
+        f"ребалансов {len(port.rebalances)} · lookback={meta.get('lookback')} "
+        f"holding={meta.get('holding')}\nЛОНГ: {longs} | ШОРТ: {shorts} · "
+        f"последний ребаланс: {last_reb}"
+    )
+
+    # агрегация ребалансов по дням: последний equity дня + число ребалансов в дне
+    by_day: dict[str, dict] = {}
+    for r in port.rebalances:
+        d = _d(r["ts"])
+        e = by_day.setdefault(d, {"date": d, "equity": r["equity"], "rebals": 0})
+        e["equity"] = r["equity"]  # последний за день
+        e["rebals"] += 1
+    days = sorted(by_day.values(), key=lambda x: x["date"])
+    prev = START_EQUITY
+    for d in days:
+        d["change_pct"] = round((d["equity"] / prev - 1.0) * 100, 2) if prev else 0.0
+        d["equity"] = round(d["equity"], 2)
+        prev = d["equity"]
+    return _clean({"running": active, "text": text, "days": days})
+
+
+def _run_backtest_mom(top: int, days: int, timeframe: str, k: int,
+                      fee: float, slippage: float) -> dict:
+    from .momentum import _BARS_PER_YEAR, walk_forward
+    from .pairs_coint import load_universe
+    from .scan_year import top_symbols
+
+    until = int(time.time() * 1000)
+    since = until - days * 24 * 3600 * 1000
+    prices = load_universe(top_symbols(top), timeframe, since, until, 5, min_coverage=0.9)
+    prices.attrs["timeframe"] = timeframe
+    if prices.shape[1] < 2 * k or len(prices) < 500:
+        return {"error": f"мало данных: {prices.shape[1]} монет, {len(prices)} баров"}
+    bph = _BARS_PER_YEAR.get(timeframe, 365 * 24) / 365
+    rows = walk_forward(prices, int(60 * bph), int(30 * bph),
+                        [24, 48, 96, 240], [12, 24, 48], k, True, fee, slippage)
+    # склеенная OOS equity
+    eq, cum = [], 1.0
+    for r in rows:
+        seg = r["_oos_eq"] / r["_oos_eq"].iloc[0] * cum
+        eq.extend([{"ts": int(t), "v": round(float(v), 4)} for t, v in seg.items()])
+        cum = float(seg.iloc[-1])
+    windows = [{kk: vv for kk, vv in r.items() if kk != "_oos_eq"} for r in rows]
+    for w in windows:
+        w["test_start"], w["test_end"] = int(w["test_start"]), int(w["test_end"])
+    return {"windows": windows, "equity": eq,
+            "total_return_pct": round((cum - 1.0) * 100, 2),
+            "wins": sum(1 for r in rows if r["oos_return_pct"] > 0), "n": len(rows)}
+
+
+@app.get("/momentum/backtest")
+async def momentum_backtest(top: int = 30, days: int = 365, timeframe: str = "1h",
+                            k: int = 3, fee: float = 0.0006, slippage: float = 0.0002):
+    """Walk-forward бэктест на лету. Тяжёлый (загрузка) → to_thread + кэш по параметрам."""
+    key = f"bt:{top}:{days}:{timeframe}:{k}:{fee}:{slippage}"
+    if key not in _MOM_CACHE:
+        _MOM_CACHE[key] = await asyncio.to_thread(
+            _run_backtest_mom, top, days, timeframe, k, fee, slippage)
+    return _clean(_MOM_CACHE[key])
+
+
+def _run_compare_mom(top: int, days: int, timeframe: str) -> dict:
+    from .compare_strategies import eq_buy_hold, eq_momentum, eq_pairs
+    from .pairs_coint import load_universe
+    from .scan_year import top_symbols
+
+    until = int(time.time() * 1000)
+    since = until - days * 24 * 3600 * 1000
+    prices = load_universe(top_symbols(top), timeframe, since, until, 5, min_coverage=0.9)
+    prices.attrs["timeframe"] = timeframe
+    out: dict[str, list] = {}
+    series = {"BuyHold": eq_buy_hold(prices), "Momentum": eq_momentum(prices, 0.0006, 0.0002)}
+    pairs = eq_pairs(prices, 0.0006, 0.0002, timeframe)
+    if pairs is not None:
+        series["Pairs"] = pairs
+    res = {}
+    for name, s in series.items():
+        s = s.dropna()
+        s = s / s.iloc[0]
+        out[name] = [{"ts": int(t), "v": round(float(v), 4)} for t, v in s.items()]
+        res[name] = round((float(s.iloc[-1]) - 1.0) * 100, 2)
+    return {"curves": out, "returns": res}
+
+
+@app.get("/momentum/compare")
+async def momentum_compare(top: int = 30, days: int = 365, timeframe: str = "1h"):
+    """Сравнение equity Momentum/Pairs/BuyHold на одном периоде. to_thread + кэш."""
+    key = f"cmp:{top}:{days}:{timeframe}"
+    if key not in _MOM_CACHE:
+        _MOM_CACHE[key] = await asyncio.to_thread(_run_compare_mom, top, days, timeframe)
+    return _clean(_MOM_CACHE[key])
+
+
+@app.get("/momentum/tests")
+async def momentum_tests():
+    """Статус юнит-тестов momentum: запускает pytest по test_momentum*.py, парсит итог."""
+    import re
+    import subprocess
+    import sys
+
+    def _run() -> dict:
+        try:
+            # без -q, чтобы pytest напечатал итоговую строку "N passed[, M failed]"
+            p = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests/test_momentum.py",
+                 "tests/test_momentum_live.py", "tests/test_momentum_api.py",
+                 "--no-header", "-p", "no:cacheprovider"],
+                cwd=str(_BASE), capture_output=True, text=True, timeout=180)
+            out = p.stdout + p.stderr
+            passed = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
+            failed = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
+            return {"passed": passed, "failed": failed, "ok": failed == 0 and passed > 0,
+                    "tail": out.strip().splitlines()[-1:] if out else []}
+        except Exception as e:  # noqa: BLE001
+            return {"passed": 0, "failed": 0, "ok": False, "error": str(e)}
+
+    return await asyncio.to_thread(_run)

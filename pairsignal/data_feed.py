@@ -62,6 +62,56 @@ def read_ohlcv_cross(cfg: StrategyConfig, limit: int = 1000) -> pd.DataFrame:
     return df
 
 
+def fetch_ohlcv_paged(ex, symbol: str, timeframe: str, since_ms: int, until_ms: int) -> pd.Series:
+    """Постранично тянет close [since_ms; until_ms) через ccxt.fetch_ohlcv(since=...).
+
+    Пачками по 1000 свечей: сдвигаем since на ts последней + шаг ТФ. Стоп, когда биржа
+    вернула < limit, ts вышли за until_ms, либо since не продвинулся (защита от зацикливания).
+    Возвращает Series close с индексом ts(ms).
+    """
+    step = ex.parse_timeframe(timeframe) * 1000  # длина свечи в мс
+    out: dict[int, float] = {}
+    since = since_ms
+    # Биржи отдают переменный размер страницы (gateio ~999, mexc 1000) и часто
+    # покрывают лишь несколько дней за вызов — крутим, пока не дойдём до until_ms.
+    # Остановка только по: пустой ответ / выход за until_ms / непродвижение since.
+    while since < until_ms:
+        batch = ex.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=1000)
+        if not batch:
+            break
+        for c in batch:
+            ts = int(c[0])
+            if ts >= until_ms:
+                break
+            out[ts] = float(c[4])
+        nxt = int(batch[-1][0]) + step
+        if nxt <= since:  # биржа не продвинулась — прерываем
+            break
+        since = nxt
+    s = pd.Series(out, dtype="float64").sort_index()
+    s.index.name = "ts"
+    return s
+
+
+def read_ohlcv_cross_range(cfg: StrategyConfig, since_ms: int, until_ms: int) -> pd.DataFrame:
+    """Как read_ohlcv_cross, но за диапазон [since_ms; until_ms) с пагинацией обеих бирж.
+
+    price_a — cfg.exchange_a, price_b — cfg.exchange_b, символ — cfg.symbol_cross.
+    inner-join по ts (dropna): спред считается только по общим свечам.
+    """
+    import ccxt
+
+    def _ex(name: str):
+        ex = getattr(ccxt, name)({"enableRateLimit": True})
+        ex.options["defaultType"] = "swap"
+        return ex
+
+    a = fetch_ohlcv_paged(_ex(cfg.exchange_a), cfg.symbol_cross, cfg.timeframe, since_ms, until_ms)
+    b = fetch_ohlcv_paged(_ex(cfg.exchange_b), cfg.symbol_cross, cfg.timeframe, since_ms, until_ms)
+    df = pd.DataFrame({"price_a": a, "price_b": b}).dropna().sort_index()
+    return df
+
+
 def generate_synthetic_cross(n: int = 3000, seed: int = 11) -> pd.DataFrame:
     """Кросс-биржевая синтетика: одна монета (SUI) на двух биржах с малым спредом.
 
