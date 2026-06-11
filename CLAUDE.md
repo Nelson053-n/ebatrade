@@ -32,6 +32,9 @@ ruff check pairsignal                            # линт
 - `virtual_exchange.py` — `VirtualExchange`: paper-филлы, комиссии, проскальзывание, P&L, позиции.
 - `engine.py` — `Engine`: оркестрация + human-in-the-loop (`approve`/`reject`), сводка.
 - `main.py` — CLI-раннер. `api.py` — FastAPI backend.
+- `st4/` — отдельная стратегия: FSM-арбитраж спреда фьючерсов **SBRF/SBPR** (FORTS, данные
+  MOEX ISS, без ключей). Своё ядро (BB200, конечный автомат, атомарные пары, reconciliation),
+  эндпоинты `/st4/*`, вкладка st4 в панели. Подробности — `pairsignal/st4/README.md`.
 
 ## Поток
 `data → indicators → SignalEngine → Engine(approve/reject) → VirtualExchange → summary`

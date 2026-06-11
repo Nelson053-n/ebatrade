@@ -85,6 +85,9 @@ header{display:flex;align-items:center;gap:18px;padding-bottom:18px;border-botto
 /* chart — панель спреда растягивается до высоты правой колонки, график заполняет остаток */
 .chartwrap{flex:1;display:flex;flex-direction:column}
 #chart{width:100%;flex:1;min-height:300px;display:block;cursor:crosshair}
+/* график st4: фиксированная высота — НЕ flex:1, иначе панель растягивается под высоту
+   соседней колонки и под графиком остаётся пустота */
+#s4chart{width:100%;height:340px;display:block;cursor:crosshair}
 canvas{width:100%;display:block}
 .chart-tools{display:inline-flex;gap:3px;margin-left:auto;align-items:center}
 .chart-tools button{font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:0;text-transform:none;
@@ -242,13 +245,14 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <button class="strat-btn" data-slot="1">st1</button>
       <button class="strat-btn" data-slot="2">st2</button>
       <button class="strat-btn" data-slot="3">st3</button>
+      <button class="strat-btn" data-slot="4">st4</button>
     </div>
-    <div class="tag">phase 1 · paper</div>
+    <div class="tag" id="hdr-tag">phase 1 · paper</div>
     <div class="pair" id="hdr-pair">BTC <span>÷</span> ETH</div>
     <div class="spacer"></div>
-    <div class="pill">данные: MEXC · только чтение</div>
-    <div class="pill badge-paper">виртуальная биржа</div>
-    <div class="pill"><span class="dot"></span> поток активен</div>
+    <div class="pill" id="hdr-data">данные: MEXC · только чтение</div>
+    <div class="pill badge-paper" id="hdr-exch">виртуальная биржа</div>
+    <div class="pill" id="hdr-flow"><span class="dot"></span> поток активен</div>
     <div class="pill" id="pill-session" title="время работы текущей торговой сессии">сессия: —</div>
     <button class="theme-toggle" id="btnStrat"><span class="ic">ⓘ</span> о стратегии</button>
     <button class="theme-toggle" id="themeToggle"><span class="ic">◐</span> <span id="themeLabel">тёмная</span></button>
@@ -322,6 +326,220 @@ tr:hover td{background:rgba(255,255,255,.015)}
     </div>
   </div>
 
+  <!-- ST4: арбитраж спреда SBRF/SBPR (FORTS) — отдельная панель, скрыта по умолчанию -->
+  <div id="st4panel" style="display:none">
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2>st4 · Спред-арбитраж SBRF / SBPR <em>фьючерсы Сбербанка, FORTS · Bollinger(200, 2σ)</em></h2>
+      <!-- часы МСК + режим работы биржи FORTS -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:12px">
+        <span style="padding:5px 12px;border-radius:7px;background:var(--bg);border:1px solid var(--line);font-weight:600">
+          🕐 <span id="s4-msk-clock">—</span> МСК</span>
+        <span id="s4-session" style="padding:5px 12px;border-radius:7px;background:var(--bg);border:1px solid var(--line)">сессия: —</span>
+        <span style="color:var(--ink-faint)">FORTS: утро 09:00–10:00 · основная 10:00–14:00 / 14:05–18:45 · вечер 19:05–23:50 (клиринги 14:00 и 18:45)</span>
+      </div>
+      <details style="font-size:13px;line-height:1.75;color:var(--ink-dim)">
+        <summary style="cursor:pointer;color:var(--signal);font-weight:600;font-size:12px;user-select:none">ⓘ о стратегии</summary>
+        <div style="margin-top:10px">
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Идея.</b> Обыкновенные (SBRF, серии SR*) и привилегированные (SBPR, серии SP*) акции одного эмитента жёстко коинтегрированы — спред <code>SBPR − SBRF</code> колеблется в узком коридоре. Торгуем возврат спреда к средней: при пробое полос Боллинджера входим против движения, выходим на пересечении SMA.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Механика.</b> На закрытии каждого 10-мин бара считаем спред и BB(<code>SMA=200</code>, <code>2σ</code>). <b>SELL</b> (шорт спреда = купить SBRF + продать SBPR) при пробое верхней полосы; <b>BUY</b> (лонг спреда) при пробое нижней. Вход проходит ещё гейт отклонения от средней (<code>AbsOfMean</code> — знаконезависимый, корректен при любом знаке спреда). Выход — по возврату к живой SMA. Исполнение пары атомарное: менее ликвидную ногу (SBPR) заливаем первой, при срыве второй — аварийный unwind первой.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Данные.</b> Реальные котировки MOEX ISS (публичные, с задержкой, без ключей). Ближайшая ликвидная серия выбирается авто-роллировером; индикаторы — только по закрытым свечам (no repaint).</p>
+        <p style="margin:0;color:var(--ink-faint)"><b>⚠ Paper по умолчанию; T-Bank sandbox — реальные ордера в песочнице.</b> Боевой контур не подключён. Высокий win-rate бэктеста объясняется силой коинтеграции на спокойном периоде; честный риск — в строке <b>maxDD</b> и в нереализованном P&L зависшей позиции (выход только по средней, стоп-лосс опционален).</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="grid">
+      <!-- LEFT: график спреда + полосы -->
+      <div>
+        <div class="panel fade">
+          <h2>Спред SBPR − SBRF <em id="s4-chart-sub">пункты · BB(200, 2σ)</em>
+            <span class="chart-tools" style="float:right;font-size:10px;color:var(--ink-faint)">колесо — зум · перетащить — сдвиг · 2× клик — сброс</span></h2>
+          <canvas id="s4chart"></canvas>
+          <div class="an-tip" id="s4tip"></div>
+          <div class="legend">
+            <span><i style="border-color:var(--ink)"></i>спред</span>
+            <span><i style="border-color:var(--ink-faint);border-top-style:dashed"></i>средняя SMA</span>
+            <span><i style="border-color:var(--chart-band)"></i>полосы ±2σ</span>
+            <span><i style="border-color:var(--ink);border-radius:50%"></i>вход</span>
+            <span><i style="border-color:var(--signal);border-radius:50%"></i>выход +</span>
+            <span><i style="border-color:var(--loss);border-radius:50%"></i>выход −</span>
+            <span><i style="border-color:var(--warn);border-top-style:dashed"></i>старт торговли</span>
+          </div>
+          <div class="readouts" style="grid-template-columns:repeat(4,1fr)">
+            <div class="ro"><label>спред</label><div class="v" id="s4-ro-spread">—</div></div>
+            <div class="ro"><label>SMA</label><div class="v" id="s4-ro-sma">—</div></div>
+            <div class="ro"><label>σ</label><div class="v" id="s4-ro-sigma">—</div></div>
+            <div class="ro"><label>z-score</label><div class="v" id="s4-ro-z">—</div></div>
+          </div>
+          <!-- инфографика: положение спреда в канале (z = (spread−SMA)/σ) -->
+          <div class="gauge">
+            <div class="scale"><div class="mid-line"></div><div class="ptr" id="s4-ptr" style="left:50%"></div></div>
+            <div class="ticks"><span>−2σ нижняя</span><span>SMA</span><span>+2σ верхняя</span></div>
+          </div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Журнал действий <em id="s4-fsm" style="font-style:normal"></em></h2>
+          <div id="s4-events" class="jscroll" style="max-height:200px;font-size:11px;line-height:1.7;color:var(--ink-dim)">
+            <div class="empty" style="text-align:left">журнал пуст</div>
+          </div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Журнал сделок <em id="s4-trades-sub"></em></h2>
+          <div class="jscroll" style="max-height:280px"><table id="s4-trades">
+            <thead><tr><th>направление</th><th>спред вх→вых</th><th>лотов</th><th>держал</th><th>проскальз.</th><th>net ₽</th><th>причина</th></tr></thead>
+            <tbody></tbody></table></div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Бэктест на истории MOEX ISS</h2>
+          <div style="font-size:11px;color:var(--ink-faint);margin-bottom:8px">Прогон стратегии на длинной истории ISS (до месяцев). Глубокая история, но котировки с задержкой.</div>
+          <div class="params" style="margin-top:0;gap:10px;margin-bottom:10px">
+            <div class="fld"><label>дней</label><input id="s4-bt-days" type="number" value="60" min="10" style="width:70px"></div>
+            <div class="fld"><label>стоп σ</label><input id="s4-bt-stop" type="number" value="0" step="0.5" min="0" style="width:60px"></div>
+            <button class="ctrl-btn approve" id="s4-btn-bt">▶ прогнать</button>
+            <span class="hint" id="s4-bt-msg"></span>
+          </div>
+          <div id="s4-bt-res" style="font-size:12px;line-height:1.8;color:var(--ink-dim);margin-bottom:10px"></div>
+          <!-- история прогонов ISS -->
+          <div style="font-size:11px;color:var(--ink-faint);margin-bottom:6px">История прогонов</div>
+          <div class="jscroll" id="s4-bth-moex-wrap" style="max-height:200px"><table id="s4-bth-moex-table">
+            <thead><tr><th>дата (МСК)</th><th>дней</th><th>стоп σ</th><th>сделок</th><th>win%</th><th>net ₽</th><th>%</th><th>maxDD%</th></tr></thead>
+            <tbody><tr><td colspan="8" class="empty" style="text-align:left">прогонов ещё не было</td></tr></tbody></table></div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Бэктест на T-Bank <em>за неделю · real-time котировки</em></h2>
+          <div style="font-size:11px;color:var(--ink-faint);margin-bottom:8px">Реальные котировки T-Bank (те же, по которым идут sandbox-ордера). T-Bank отдаёт 10m-свечи максимум за ~7 дней.</div>
+          <div class="params" style="margin-top:0;gap:10px;margin-bottom:10px">
+            <div class="fld"><label>стоп σ</label><input id="s4-btb-stop" type="number" value="0" step="0.5" min="0" style="width:60px"></div>
+            <button class="ctrl-btn approve" id="s4-btn-btb">▶ прогнать неделю</button>
+            <span class="hint" id="s4-btb-msg"></span>
+          </div>
+          <div id="s4-btb-res" style="font-size:12px;line-height:1.8;color:var(--ink-dim);margin-bottom:10px"></div>
+          <div class="jscroll" id="s4-btb-table-wrap" style="max-height:200px;display:none"><table id="s4-btb-table">
+            <thead><tr><th>направление</th><th>спред вх→вых</th><th>держал</th><th>net ₽</th><th>причина</th></tr></thead>
+            <tbody></tbody></table></div>
+          <!-- история прогонов: отслеживание результативности во времени -->
+          <div style="margin-top:14px;font-size:11px;color:var(--ink-faint);margin-bottom:6px">История прогонов <span id="s4-bth-note">(обновляется при запуске; авто раз в 2-3 дня)</span></div>
+          <div class="jscroll" id="s4-bth-wrap" style="max-height:200px"><table id="s4-bth-table">
+            <thead><tr><th>дата (МСК)</th><th>стоп σ</th><th>сделок</th><th>win%</th><th>net ₽</th><th>%</th><th>maxDD%</th></tr></thead>
+            <tbody><tr><td colspan="7" class="empty" style="text-align:left">прогонов ещё не было</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- RIGHT: статус FSM + позиция + контролы -->
+      <div>
+        <div class="panel fade">
+          <h2>Состояние <em id="s4-legs">—</em></h2>
+          <!-- крупный статус: что бот делает прямо сейчас -->
+          <div id="s4-status" style="padding:10px 14px;border-radius:8px;background:var(--bg);
+               border:1px solid var(--line);margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px">
+              <span id="s4-status-dot" style="width:9px;height:9px;border-radius:50%;background:var(--ink-faint);flex-shrink:0"></span>
+              <span id="s4-status-txt" style="color:var(--ink)">—</span>
+            </div>
+            <div id="s4-status-sub" style="font-size:11px;color:var(--ink-dim);margin-top:5px;line-height:1.5">—</div>
+          </div>
+          <div class="readouts" style="grid-template-columns:1fr 1fr">
+            <div class="ro"><label>режим</label><div class="v" id="s4-mode" style="font-size:14px">—</div></div>
+            <div class="ro"><label>данные</label><div class="v" id="s4-src" style="font-size:14px">—</div></div>
+            <div class="ro"><label>equity</label><div class="v" id="s4-equity">—</div></div>
+            <div class="ro"><label>P&L дня</label><div class="v" id="s4-daypnl">—</div></div>
+            <div class="ro"><label>сделок</label><div class="v" id="s4-ntrades">—</div></div>
+            <div class="ro"><label>win-rate</label><div class="v" id="s4-winrate">—</div></div>
+          </div>
+          <div id="s4-halt" style="display:none;margin-top:10px;padding:8px 12px;border-radius:8px;background:rgba(255,93,108,.12);color:var(--loss);font-weight:600"></div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Позиция</h2>
+          <div id="s4-pos" style="font-size:13px;color:var(--ink-dim)">нет открытой позиции</div>
+          <div id="s4-pending" style="display:none;margin-top:10px"></div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Управление</h2>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="ctrl-btn approve" id="s4-btn-live">▶ live</button>
+            <button class="ctrl-btn" id="s4-btn-player">▶ демо (синтетика)</button>
+            <button class="ctrl-btn" id="s4-btn-pause">❚❚ пауза</button>
+            <button class="ctrl-btn reject" id="s4-btn-flat">⊗ flat-all</button>
+            <button class="ctrl-btn" id="s4-btn-reset">↺ сброс</button>
+          </div>
+          <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:12px;font-size:12px">
+            <label style="display:flex;gap:6px;align-items:center;cursor:pointer">
+              <input type="checkbox" id="s4-auto" checked> авто-вход (FSM без подтверждения)</label>
+            <label style="display:flex;gap:6px;align-items:center;cursor:pointer">
+              <input type="checkbox" id="s4-trading" checked> торговля разрешена</label>
+          </div>
+          <div id="s4-confirm-row" style="display:none;gap:8px;margin-top:10px">
+            <button class="ctrl-btn approve" id="s4-btn-approve">✓ подтвердить вход</button>
+            <button class="ctrl-btn reject" id="s4-btn-reject">✕ отклонить</button>
+          </div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Коннектор исполнения <em id="s4-conn-badge">paper</em></h2>
+          <div class="params" style="margin-top:0;gap:10px">
+            <div class="fld"><label>режим</label>
+              <select id="s4-conn-mode" style="width:150px">
+                <option value="paper">paper (демо)</option>
+                <option value="tbank_sandbox">T-Bank песочница</option>
+              </select></div>
+            <div class="fld"><label>API-токен T-Bank</label>
+              <input id="s4-conn-token" type="password" autocomplete="off"
+                     placeholder="t.xxx (для sandbox)" style="width:180px"></div>
+            <button class="ctrl-btn approve" id="s4-btn-conn">применить</button>
+            <button class="ctrl-btn reject" id="s4-btn-forget" title="удалить сохранённый токен">забыть токен</button>
+          </div>
+          <div id="s4-conn-msg" style="margin-top:6px;font-size:11px;color:var(--ink-faint)"></div>
+          <div style="margin-top:4px;font-size:10px;color:var(--ink-faint);line-height:1.6">
+            Токен сохраняется в файл <code>.tbank_token</code> (права 0600, не в git) — переживает
+            рестарт. Песочница активна только в режиме <b>live</b> (MOEX ISS). Только SandboxService —
+            реальные биржевые ордера не отправляются. «Забыть токен» — удалить с диска.</div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Параметры</h2>
+          <div class="params" style="margin-top:0;gap:10px">
+            <div class="fld"><label>SMA</label><input id="s4-p-sma" type="number" value="200" min="20" style="width:70px"></div>
+            <div class="fld"><label>σ-mult</label><input id="s4-p-sig" type="number" value="2" step="0.1" min="0.5" style="width:60px"></div>
+            <div class="fld"><label>гейт %</label><input id="s4-p-dev" type="number" value="2" step="0.5" min="0" style="width:60px"></div>
+            <div class="fld"><label>стоп σ</label><input id="s4-p-stop" type="number" value="0" step="0.5" min="0" style="width:60px"></div>
+            <div class="fld"><label>лотов</label><input id="s4-p-lots" type="number" value="1" min="1" style="width:55px"></div>
+            <button class="ctrl-btn approve" id="s4-btn-apply">применить</button>
+          </div>
+          <div style="margin-top:6px;font-size:10px;color:var(--ink-faint)">применение параметров сбрасывает сессию (журнал/баланс)</div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Гарантийное обеспечение <em id="s4-margin-sub">плечо фьючерса</em>
+            <button class="ctrl-btn" id="s4-btn-margin" style="float:right">↻ обновить</button></h2>
+          <div style="font-size:11px;color:var(--ink-faint);margin-bottom:8px line-height:1.5">Фьючерс — маржинальный инструмент: блокируется не полная стоимость, а ГО (≈5.8× плечо). «Лотов» = число пар контрактов. ГО без скидки за коррелированность ног (верхняя граница).</div>
+          <div id="s4-margin-head" style="font-size:12px;color:var(--ink-dim);margin-bottom:8px">—</div>
+          <table id="s4-margin-table" style="font-size:12px">
+            <thead><tr><th>контрактов (пар)</th><th>ГО нужно</th><th>% от баланса</th></tr></thead>
+            <tbody><tr><td colspan="3" class="empty" style="text-align:left">нажмите «обновить»</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Юнит-тесты st4 <em style="font-style:normal">контроль качества кода</em></h2>
+          <div style="font-size:11px;color:var(--ink-faint);margin-bottom:8px;line-height:1.6">
+            Автопроверки правильности торговой логики: расчёт Боллинджера и спреда, знак P&L (шорт спреда
+            зарабатывает на падении), сигналы входа/выхода, атомарность пары (нет «голой» ноги), формирование
+            sandbox-ордеров. <b>Зелёный результат = логике можно доверять</b> (после правок ничего не сломалось).</div>
+          <button class="ctrl-btn" id="s4-btn-tests">▶ запустить тесты</button>
+          <span id="s4-tests-badge" style="margin-left:12px;font-weight:600"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ПАРНЫЙ LAYOUT st1/st2 (график, аналитика, журнал, параметры) — прячется на st3/st4 -->
+  <div id="pairlayout">
   <div class="grid">
     <!-- LEFT: chart + indicators -->
     <div>
@@ -450,6 +668,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <span class="hint" id="params-msg">доллар-нейтрально · ноги по β</span>
     </div>
   </div>
+  </div><!-- /pairlayout -->
 
   <!-- О СТРАТЕГИИ (модальное окно) -->
   <!-- ПОДТВЕРЖДЕНИЕ СБРОСА -->
@@ -517,7 +736,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
    </div>
   </div>
 
-  <div class="note">
+  <div class="note" id="page-note">
     <b>Панель phase 1 — paper.</b> Источник данных переключается кнопкой «источник»: синтетический
     генератор (демо) либо реальные котировки MEXC (только чтение, по закрытым свечам, no repaint).
     Вход — рекомендация (или авто-вход), выход/стоп — автоматически (<b>engine.py</b>).
@@ -530,7 +749,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
 /* ===== ПОДКЛЮЧЕНИЕ К BACKEND (api.py) ===== */
 const API = '';                      // тот же origin, что и панель
 const POLL_MS = 700;                 // период опроса /state
-let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v===1||v===2||v===3)?v:1; }catch(e){ return 1; } })();
+let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v>=1&&v<=4)?v:1; }catch(e){ return 1; } })();
 let cfg = { entry_z:2.0, exit_z:0.2, stop_z:3.5, min_width_pct:2.0, risk_pct:2.0 };
 let snap = null;                     // последний ответ /state
 
@@ -796,6 +1015,13 @@ function render(s){
   const mBtn=$('btnMode'), mHint=$('mode-hint'), tf=cfg.timeframe||'5m';
   const A=(s.pair&&s.pair.a)||'A', B=(s.pair&&s.pair.b)||'B';
   $('hdr-pair').innerHTML=A+' <span>÷</span> '+B;
+  // восстановить шапочные плашки для st1/st2 (s4Render их переопределяет под st4)
+  if($('hdr-tag')) $('hdr-tag').textContent='phase 1 · paper';
+  if($('hdr-data')) $('hdr-data').textContent='данные: MEXC · только чтение';
+  if($('hdr-exch')) $('hdr-exch').textContent='виртуальная биржа';
+  if($('hdr-flow')){ const dot=$('hdr-flow').querySelector('.dot'); dot.style.background=''; dot.style.boxShadow=''; $('hdr-flow').childNodes[1].nodeValue=' поток активен'; }
+  const note=$('page-note');
+  if(note) note.innerHTML='<b>Панель phase 1 — paper.</b> Источник данных переключается кнопкой «источник»: синтетический генератор (демо) либо реальные котировки MEXC (только чтение, по закрытым свечам, no repaint). Вход — рекомендация (или авто-вход), выход/стоп — автоматически (<b>engine.py</b>). Реальные ордера не выставляются — только виртуальное исполнение. Метрики синтетики не отражают реальную доходность — нужен бэктест на истории.';
   const anp=$('an-pair'); if(anp) anp.textContent=A+'/'+B;
   if(s.live){
     mBtn.textContent='источник: LIVE MEXC'; mBtn.classList.add('live-on');
@@ -1157,9 +1383,11 @@ function fmtDur(sec){
 }
 function tickSession(){
   const el=$('pill-session');
-  if(!snap || !snap.session_started){ el.textContent='сессия: —'; return; }
+  // на вкладке st4 показываем её сессию (свой снимок _s4snap), иначе — слотовый snap
+  const src = SLOT===4 ? _s4snap : snap;
+  if(!src || !src.session_started){ el.textContent='сессия: —'; return; }
   const nowC=Date.now()/1000 + _clockSkew;
-  el.textContent='сессия: '+fmtDur(nowC - snap.session_started);
+  el.textContent='сессия: '+fmtDur(nowC - src.session_started);
 }
 setInterval(tickSession, 1000);
 
@@ -1168,10 +1396,14 @@ function markSlot(){
   $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
     b.classList.toggle('active', +b.dataset.slot===SLOT);
   });
-  // st3 (momentum) — отдельная панель; прячем парный layout и наоборот
-  const isM = SLOT===3;
-  document.querySelectorAll('.grid').forEach(g=> g.style.display = isM ? 'none' : '');
+  // st3 (momentum) и st4 (спред SBRF/SBPR) — отдельные панели; прячем парный layout st1/st2
+  const isM = SLOT===3, isS4 = SLOT===4;
+  const special = isM || isS4;
+  // весь парный layout st1/st2 (график, аналитика, журнал, параметры) обёрнут в #pairlayout —
+  // прячем его целиком на спец-вкладках, чтобы не светились чужие BTC/ETH/SOL панели.
+  $('pairlayout').style.display = special ? 'none' : '';
   $('st3panel').style.display = isM ? '' : 'none';
+  $('st4panel').style.display = isS4 ? '' : 'none';
 }
 // загрузить конфиг/пары/пресеты/тф и подключиться к сессии активного слота
 async function initSession(){
@@ -1207,8 +1439,9 @@ async function switchSlot(n){
   SLOT=n; try{ localStorage.setItem('slot', String(n)); }catch(e){}
   markSlot();
   // сбросить локальный кэш отображения — у нового слота свой график/таймфрейм/зум
-  snap=null; _chartTF=null; resetZoom();
+  snap=null; _chartTF=null; resetZoom(); s4ResetZoom();
   if(n===3){ momInit(); return; }
+  if(n===4){ s4Init(); return; }
   await initSession();
 }
 $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
@@ -1337,13 +1570,549 @@ $('btnMTests').onclick=async()=>{
   }catch(e){ $('m-tests-badge').textContent='ошибка'; }
 };
 
+/* ===== ST4: СПРЕД-АРБИТРАЖ SBRF/SBPR ===== */
+let _s4snap=null, _s4Timer=null, _s4Started=false;
+async function s4api(path, method='GET', body=null){
+  const opt={method};
+  if(body!==null){ opt.headers={'Content-Type':'application/json'}; opt.body=JSON.stringify(body); }
+  const r=await fetch(API+'/st4'+path, opt);
+  if(!r.ok){ let d=''; try{d=(await r.json()).detail||'';}catch(e){} throw new Error(d||(path+' → '+r.status)); }
+  return r.json();
+}
+function s4money(v){ return (v>=0?'+':'')+Math.round(v).toLocaleString('ru')+' ₽'; }
+
+// --- зум/панорама графика st4 (отдельные переменные, не пересекаются с st1) ---
+let _s4zoom=1, _s4panRight=null, _s4fullLen=0, _s4lastHist=null;
+function s4ResetZoom(){ _s4zoom=1; _s4panRight=null; }
+function s4tsLabel(ms){ const m=s4msk(ms); return m.hh+':'+m.mm; }   // ось X — по МСК
+
+// Полноценный график спреда: оси, сетка, полосы BB, средняя, спред, точки сделок,
+// трекинг открытой позиции. Зум колесом, панорама перетаскиванием, dblclick — сброс.
+function s4DrawChart(hist, trades, openPos){
+  const cv=$('s4chart'); if(!cv) return;
+  if(arguments.length>0) _s4lastHist={hist:hist||[], trades:trades||[], openPos:openPos||null};
+  const data=_s4lastHist||{hist:[],trades:[],openPos:null};
+  const r=cv.getBoundingClientRect();
+  if(r.width<5||r.height<5){ requestAnimationFrame(()=>s4DrawChart()); return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  const full=(data.hist||[]).filter(p=>p.sma!=null&&!Number.isNaN(p.sma));
+  if(full.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев индикатора BB('+(_s4snap?_s4snap.sma_period:200)+')…',12,24); return; }
+  _s4fullLen=full.length;
+  // видимое окно (зум/панорама)
+  const visN=Math.max(10, Math.round(full.length*_s4zoom));
+  const right=_s4panRight==null?full.length:Math.min(full.length,Math.max(visN,_s4panRight));
+  const left=Math.max(0,right-visN);
+  const series=full.slice(left,right);
+  if(series.length<2) return;
+  const cs=getComputedStyle(document.documentElement);
+  const C={fill:cs.getPropertyValue('--chart-fill').trim(),band:cs.getPropertyValue('--chart-band').trim(),
+           mid:cs.getPropertyValue('--chart-mid').trim(),line:cs.getPropertyValue('--chart-line').trim(),
+           ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
+  const ML=52,MB=22,MT=6,MR=8;
+  const px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const all=series.flatMap(p=>[p.upper,p.lower,p.spread]);
+  let lo=Math.min(...all), hi=Math.max(...all); const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
+  const x=i=>px0+i/(series.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
+
+  ctx.font='9px IBM Plex Mono, monospace'; ctx.textBaseline='middle';
+  // ось Y (спред, пункты) + сетка
+  ctx.textAlign='right';
+  const TY=5;
+  for(let i=0;i<=TY;i++){
+    const v=lo+(hi-lo)*i/TY, yy=y(v);
+    ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.5;
+    ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(v.toFixed(0), px0-6, yy);
+  }
+  // ось X (время)
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  const TX=Math.min(5,series.length-1);
+  for(let i=0;i<=TX;i++){
+    const idx=Math.round(i/TX*(series.length-1)), xx=x(idx);
+    const lbl=series[idx].ts?s4tsLabel(series[idx].ts):('#'+idx);
+    ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.35;
+    ctx.beginPath(); ctx.moveTo(xx,py0); ctx.lineTo(xx,py1); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(lbl, xx, py1+5);
+  }
+  // заливка между полосами
+  ctx.beginPath();
+  series.forEach((p,i)=>{const X=x(i),Y=y(p.upper); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  for(let i=series.length-1;i>=0;i--) ctx.lineTo(x(i),y(series[i].lower));
+  ctx.closePath(); ctx.fillStyle=C.fill; ctx.fill();
+  // полосы
+  ['upper','lower'].forEach(k=>{ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p[k]);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.band;ctx.lineWidth=1;ctx.stroke();});
+  // средняя (пунктир)
+  ctx.setLineDash([4,4]);ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.sma);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.mid;ctx.stroke();ctx.setLineDash([]);
+  // спред
+  ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.spread);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  ctx.strokeStyle=C.line;ctx.lineWidth=1.6;ctx.stroke();
+
+  // точки входа/выхода сделок
+  const win=cs.getPropertyValue('--signal').trim(), loss=cs.getPropertyValue('--loss').trim();
+  const ink=cs.getPropertyValue('--ink').trim(), panel=cs.getPropertyValue('--panel').trim();
+  const t0=series[0].ts, t1=series[series.length-1].ts;
+  const inRange=ts=>ts!=null && ts>=t0-1 && ts<=t1+1;
+  const idxAt=ts=>{ let bi=0,bd=Infinity; series.forEach((p,i)=>{const d=Math.abs((p.ts||0)-ts); if(d<bd){bd=d;bi=i;}}); return bi; };
+  const ring=(X,Y,col)=>{ ctx.beginPath();ctx.arc(X,Y,4,0,7);ctx.fillStyle=panel;ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=col;ctx.stroke(); };
+  // вертикальная линия СТАРТА торговли (граница backfill → живая работа по стратегии)
+  const tStart=window._s4tradeStart;
+  if(tStart && inRange(tStart)){
+    const xs=x(idxAt(tStart));
+    ctx.save();
+    ctx.strokeStyle=cs.getPropertyValue('--warn').trim(); ctx.lineWidth=1.5; ctx.setLineDash([5,4]); ctx.globalAlpha=.8;
+    ctx.beginPath(); ctx.moveTo(xs,py0); ctx.lineTo(xs,py1); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.fillStyle=cs.getPropertyValue('--warn').trim(); ctx.font='9px IBM Plex Mono,monospace'; ctx.textAlign='left'; ctx.textBaseline='top';
+    ctx.fillText('▸ старт', xs+3, py0+2);
+    ctx.restore();
+  }
+  (data.trades||[]).forEach(t=>{
+    if(!inRange(t.entry_ts)) return;
+    const col = t.net_pnl_rub>=0 ? win : loss;
+    const i1=idxAt(t.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
+    if(inRange(t.exit_ts)){
+      const i2=idxAt(t.exit_ts), X2=x(i2), Y2=y(series[i2].spread);
+      ctx.save(); ctx.globalAlpha=.35; ctx.strokeStyle=col; ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(X2,Y2);ctx.stroke(); ctx.restore();
+      ring(X2,Y2,col);
+    }
+    ring(X1,Y1,ink);
+  });
+  // трекинг открытой позиции: кружок входа + пунктир до текущей точки
+  const op=data.openPos;
+  if(op && inRange(op.entry_ts)){
+    const i1=idxAt(op.entry_ts), X1=x(i1), Y1=y(series[i1].spread);
+    const Xc=x(series.length-1), Yc=y(series[series.length-1].spread);
+    const col = op.unrealized_rub>=0 ? win : loss;
+    ctx.save(); ctx.globalAlpha=.4; ctx.strokeStyle=col; ctx.setLineDash([3,3]); ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(Xc,Yc);ctx.stroke(); ctx.restore();
+    ring(X1,Y1, op.state==='short_spread'?cs.getPropertyValue('--short').trim():win);
+  }
+  // последняя точка (пульс)
+  const lastp=series[series.length-1], lx=x(series.length-1), ly=y(lastp.spread);
+  ctx.beginPath();ctx.arc(lx,ly,3.5,0,7);ctx.fillStyle=C.line;ctx.shadowColor=C.line;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
+  // сохраняем геометрию для tooltip при наведении
+  window._s4geom = {series, x, y, px0, px1, py0, py1,
+    trades:(data.trades||[]).filter(t=>inRange(t.entry_ts)).map(t=>({t, xi:x(idxAt(t.entry_ts)), yi:y(series[idxAt(t.entry_ts)].spread),
+       xo:inRange(t.exit_ts)?x(idxAt(t.exit_ts)):null, yo:inRange(t.exit_ts)?y(series[idxAt(t.exit_ts)].spread):null}))};
+}
+function s4Redraw(){ if(_s4lastHist) s4DrawChart(); }
+// разместить tooltip со смещением от курсора, не заслоняя точку наведения (крестик)
+function s4PlaceTip(tip, mx, my, r){
+  const OFF=16;                         // зазор от курсора
+  const tw=tip.offsetWidth||170, th=tip.offsetHeight||44;
+  // по X: справа от курсора, при нехватке места — слева
+  let left = mx+OFF; if(left+tw > r.width-4) left = mx-OFF-tw;
+  left = Math.max(4, Math.min(left, r.width-tw-4));
+  // по Y: ВЫШЕ курсора (не перекрывает точку), при нехватке сверху — ниже
+  let top = my-OFF-th; if(top < 4) top = my+OFF;
+  top = Math.max(4, Math.min(top, r.height-th-4));
+  tip.style.left=left+'px'; tip.style.top=top+'px';
+}
+
+// таблица истории прогонов бэктеста (результативность во времени)
+// расчёт гарантийного обеспечения для разного числа контрактов
+async function s4LoadMargin(){
+  const head=$('s4-margin-head'), tb=$('s4-margin-table'); if(!tb) return;
+  head.textContent='загрузка ГО из биржи…';
+  try{
+    const d=await s4api('/margin');
+    if(d.error){ head.textContent=d.error; return; }
+    const lev=(32339/(d.margin_ord||1)).toFixed(1);
+    head.innerHTML=`ГО на 1 пару (<b>${d.legs.ord}+${d.legs.pref}</b>): <b>${d.margin_pair.toLocaleString('ru')}₽</b> `
+      +`(${d.margin_ord.toLocaleString('ru')} + ${d.margin_pref.toLocaleString('ru')}) · встроенное плечо ≈ ${lev}×`
+      +(d.balance_rub?` · баланс sandbox ${d.balance_rub.toLocaleString('ru')}₽`:'');
+    const body=tb.querySelector('tbody'); body.innerHTML='';
+    (d.rows||[]).forEach(r=>{
+      const pct=r.pct_of_balance;
+      const pctCol = pct==null?'var(--ink-dim)':(pct>50?'var(--loss)':(pct>25?'var(--warn)':'var(--signal)'));
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td><b>${r.lots}</b></td><td>${r.margin_rub.toLocaleString('ru')} ₽</td>`
+        +`<td style="color:${pctCol}">${pct==null?'—':pct+'%'}</td>`;
+      body.appendChild(tr);
+    });
+  }catch(e){ head.textContent='ошибка: '+e.message; }
+}
+
+// таблица истории прогонов ISS-бэктеста (есть колонка «дней» — период переменный)
+function s4RenderBtHistoryMoex(hist){
+  const tb=$('s4-bth-moex-table'); if(!tb) return;
+  const body=tb.querySelector('tbody'); body.innerHTML='';
+  if(!hist || !hist.length){ body.innerHTML='<tr><td colspan="8" class="empty" style="text-align:left">прогонов ещё не было</td></tr>'; return; }
+  hist.slice().reverse().forEach(h=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${h.date}</td><td>${h.days||'—'}</td><td>${h.stop_sigma}</td><td>${h.trades}</td>`+
+      `<td>${h.win_rate_pct}%</td>`+
+      `<td style="color:${h.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(h.net_pnl_rub)}</td>`+
+      `<td>${fmt(h.return_pct,2)}</td><td>${h.max_drawdown_pct}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+function s4RenderBtHistory(hist){
+  const tb=$('s4-bth-table'); if(!tb) return;
+  const body=tb.querySelector('tbody'); body.innerHTML='';
+  if(!hist || !hist.length){ body.innerHTML='<tr><td colspan="7" class="empty" style="text-align:left">прогонов ещё не было</td></tr>'; return; }
+  hist.slice().reverse().forEach(h=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${h.date}</td><td>${h.stop_sigma}</td><td>${h.trades}</td>`+
+      `<td>${h.win_rate_pct}%</td>`+
+      `<td style="color:${h.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(h.net_pnl_rub)}</td>`+
+      `<td>${fmt(h.return_pct,2)}</td><td>${h.max_drawdown_pct}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+function s4RenderTrades(trades){
+  const tb=$('s4-trades').querySelector('tbody'); tb.innerHTML='';
+  $('s4-trades-sub').textContent = trades.length? trades.length+' закрытых' : '';
+  if(!trades.length){ tb.innerHTML='<tr><td colspan="7" class="empty" style="text-align:left">сделок пока нет</td></tr>'; return; }
+  trades.slice().reverse().forEach(t=>{
+    const dir = t.state==='short_spread' ? '<span style="color:var(--short)">шорт спреда</span>' : '<span style="color:var(--signal)">лонг спреда</span>';
+    const net = t.net_pnl_rub;
+    const reason = {exit:'возврат к SMA', stop:'стоп σ', time_stop:'тайм-стоп', flat_all:'flat-all'}[t.reason]||t.reason;
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${dir}</td><td>${Math.round(t.entry_spread)} → ${Math.round(t.exit_spread)}</td>`+
+      `<td>${t.lots}</td><td>${t.bars_held}</td><td>${(t.slippage_ticks||0).toFixed(1)}t</td>`+
+      `<td style="color:${net>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(net)}</td><td style="color:var(--ink-dim)">${reason}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+// MSK (UTC+3) из unix ms → {hh,mm,ss, minutes_of_day}
+function s4msk(ms){
+  const d=new Date(ms); const t=d.getTime()+(d.getTimezoneOffset()+180)*60000; const m=new Date(t);
+  return {hh:String(m.getHours()).padStart(2,'0'),mm:String(m.getMinutes()).padStart(2,'0'),
+          ss:String(m.getSeconds()).padStart(2,'0'),min:m.getHours()*60+m.getMinutes(),dow:m.getDay()};
+}
+// текущий режим торговой сессии FORTS по времени МСК
+function s4fortsSession(min,dow){
+  // выходные: доп. сессия 09:50–19:00 (упрощённо — основная)
+  const inR=(a,b)=>min>=a&&min<b;
+  if(inR(14*60,14*60+5)) return {txt:'клиринг (14:00–14:05)',color:'var(--warn)'};
+  if(inR(18*60+45,19*60+5)) return {txt:'вечерний клиринг (18:45–19:05)',color:'var(--warn)'};
+  if(inR(9*60,10*60)) return {txt:'утренняя сессия',color:'var(--signal)'};
+  if(inR(10*60,14*60)||inR(14*60+5,18*60+45)) return {txt:'основная сессия',color:'var(--signal)'};
+  if(inR(19*60+5,23*60+50)) return {txt:'вечерняя сессия',color:'var(--signal)'};
+  return {txt:'торги закрыты',color:'var(--ink-dim)'};
+}
+function s4Clock(){
+  if(SLOT!==4) return;
+  const m=s4msk(Date.now());
+  const el=$('s4-msk-clock'); if(el) el.textContent=`${m.hh}:${m.mm}:${m.ss}`;
+  const se=$('s4-session'); if(se){ const s=s4fortsSession(m.min,m.dow); se.textContent='● '+s.txt; se.style.color=s.color; }
+}
+setInterval(s4Clock,1000);
+
+function s4Render(s){
+  _s4snap=s;
+  const b = s.history && s.history.length ? s.history[s.history.length-1] : null;
+  $('s4-ro-spread').textContent = b? Math.round(b.spread) : '—';
+  $('s4-ro-sma').textContent = b? Math.round(b.sma) : '—';
+  $('s4-ro-sigma').textContent = b? b.sigma.toFixed(1) : '—';
+  // z-score спреда = (spread − SMA)/σ + указатель на инфографике
+  if(b && b.sigma>0){
+    const z=(b.spread-b.sma)/b.sigma;
+    $('s4-ro-z').textContent=(z>=0?'+':'')+z.toFixed(2);
+    $('s4-ro-z').style.color = Math.abs(z)>=(s.sigma_mult||2)?'var(--warn)':'var(--ink)';
+    const clamp=Math.max(-3,Math.min(3,z)); $('s4-ptr').style.left=((clamp+3)/6*100)+'%';
+  } else { $('s4-ro-z').textContent='—'; }
+  $('s4-chart-sub').textContent = `${s.legs.pref} − ${s.legs.ord} · BB(${s.sma_period}, ${s.sigma_mult}σ)`;
+  $('s4-legs').textContent = `${s.legs.ord} / ${s.legs.pref}` + (s.legs.ord_expiry? ' · эксп '+s.legs.ord_expiry : '');
+  // --- шапка для st4 (переопределяем st1/st2-плашки, чтобы не вводить в заблуждение) ---
+  const hp=$('hdr-pair'); if(hp) hp.innerHTML='SBRF <span>÷</span> SBPR';
+  const sandboxMode = s.connector_mode==='tbank_sandbox';
+  // кнопка live: источник данных зависит от режима (sandbox→T-Bank real-time, paper→MOEX ISS)
+  const bl=$('s4-btn-live'); if(bl && !s.live) bl.textContent = sandboxMode ? '▶ live (T-Bank)' : '▶ live (ISS)';
+  // нижний пояснительный текст — под st4
+  const note=$('page-note');
+  if(note) note.innerHTML = sandboxMode
+    ? '<b>st4 — арбитраж спреда SBRF/SBPR на FORTS.</b> Режим <b>T-Bank песочница</b>: реальные ордера на '
+      +'ВИРТУАЛЬНОМ счёте T-Bank (виртуальные деньги, биржа не затрагивается). Котировки real-time из T-Bank, '
+      +'индикаторы по закрытым свечам (no repaint). Вход по пробою полос Боллинджера, выход/стоп — авто. '
+      +'Sandbox активен только в live. Боевой контур не подключён.'
+    : '<b>st4 — арбитраж спреда SBRF/SBPR на FORTS.</b> Режим <b>paper</b>: виртуальное исполнение, реальные '
+      +'ордера не выставляются. Данные — синтетика (демо) или реальные котировки MOEX ISS (с задержкой, по '
+      +'закрытым свечам, no repaint). Для реального исполнения переключите коннектор на T-Bank песочницу.';
+  if($('hdr-tag')) $('hdr-tag').textContent = sandboxMode ? 'phase 2 · sandbox' : 'phase 1 · paper';
+  if($('hdr-data')) $('hdr-data').textContent = 'данные: '+(s.data_provider||'—');
+  if($('hdr-exch')) $('hdr-exch').textContent = (sandboxMode && s.sandbox_active) ? 'T-Bank песочница' : 'виртуальная биржа';
+  const hf=$('hdr-flow');
+  if(hf){
+    const on = s.live || s.player;
+    hf.querySelector('.dot').style.background = on ? '' : 'var(--ink-faint)';
+    hf.querySelector('.dot').style.boxShadow = on ? '' : 'none';
+    hf.childNodes[1].nodeValue = on ? ' поток активен' : ' остановлено';
+  }
+  const fsmRu={flat:'FLAT (нет позиции)',short_spread:'ШОРТ спреда',long_spread:'ЛОНГ спреда',entering_short:'вход в шорт…',entering_long:'вход в лонг…',exiting:'выход…',halted:'⛔ HALTED'};
+  $('s4-fsm').textContent=fsmRu[s.fsm_state]||s.fsm_state;
+  $('s4-fsm').style.color = s.fsm_state==='halted'?'var(--loss)':(s.fsm_state.includes('short')?'var(--short)':(s.fsm_state.includes('long')?'var(--signal)':'var(--ink)'));
+  const isLive = s.data_source==='live';
+  // честный провайдер котировок (T-Bank real-time / MOEX ISS / синтетика)
+  $('s4-src').textContent = s.data_provider || (isLive?'MOEX ISS':'синтетика');
+  $('s4-src').style.color = (s.data_provider==='T-Bank')?'var(--signal)':(isLive?'var(--ink)':'var(--ink-dim)');
+  // режим исполнения. ВАЖНО: sandbox работает ТОЛЬКО в live. Если выбран T-Bank, но данные
+  // синтетика — sandbox не активен (фактически paper), подсвечиваем это жёлтым.
+  const sandbox = s.connector_mode==='tbank_sandbox';
+  // режим: T-Bank активен / ошибка (токен) / нужен live / paper
+  let modeTxt='paper', modeCol='var(--ink)';
+  if(sandbox){
+    if(s.sandbox_active){ modeTxt='T-Bank ✓'; modeCol='var(--signal)'; }
+    else if(s.sandbox_error){ modeTxt='T-Bank — ошибка'; modeCol='var(--loss)'; }
+    else { modeTxt='T-Bank — нужен live'; modeCol='var(--warn)'; }
+  }
+  $('s4-mode').textContent=modeTxt; $('s4-mode').style.color=modeCol;
+  // --- крупный статус-баннер: что бот делает прямо сейчас ---
+  const flowing = s.live || s.player;
+  const inPos = !!s.position;
+  let dotColor='var(--ink-faint)', statusTxt=s.wait_reason||'—';
+  // спец-случаи коннектора
+  const sandboxFailed = sandbox && isLive && !s.sandbox_active && s.sandbox_error;
+  const sandboxWaitsLive = sandbox && !isLive && flowing;
+  if(s.halted){ dotColor='var(--loss)'; }
+  else if(sandboxFailed){ dotColor='var(--loss)'; statusTxt='sandbox не запустился: '+s.sandbox_error+' (исполнение идёт как paper)'; }
+  else if(sandboxWaitsLive){ dotColor='var(--warn)'; statusTxt='режим T-Bank выбран, но идут демо-данные — нажмите «live», чтобы sandbox заработал'; }
+  else if(inPos){ dotColor=s.position.state==='short_spread'?'var(--short)':'var(--signal)'; }
+  else if(!flowing){ dotColor='var(--ink-faint)'; }
+  else if(!s.warmup_done){ dotColor='var(--warn)'; }
+  else if(s.data_source==='live' && s.data_lag_min!=null && s.data_lag_min>25){ dotColor='var(--warn)'; }
+  else { dotColor='var(--signal)'; }   // прогрет, торгует/ждёт сигнал
+  $('s4-status-dot').style.background=dotColor;
+  $('s4-status-txt').textContent=statusTxt;
+  // подпись под статусом: стратегия + лаг данных
+  let sub = s.strategy_name||'';
+  if(s.data_source==='live' && s.data_lag_min!=null) sub += ` · последний бар ${s.data_lag_min} мин назад`;
+  $('s4-status-sub').textContent=sub;
+  // журнал действий
+  const evbox=$('s4-events');
+  if(s.events && s.events.length){
+    const kindColor={position:'var(--signal)',exit:'var(--ink)',halt:'var(--loss)',warn:'var(--warn)',info:'var(--ink-dim)'};
+    evbox.innerHTML = s.events.slice().reverse().map(e=>{
+      const m=s4msk(e.ts*1000), hh=m.hh, mm=m.mm, ss=m.ss;   // журнал — по МСК
+      return `<div style="padding:2px 0"><span style="color:var(--ink-faint)">${hh}:${mm}:${ss}</span> <span style="color:${kindColor[e.kind]||'var(--ink-dim)'}">${e.message}</span></div>`;
+    }).join('');
+  } else evbox.innerHTML='<div class="empty" style="text-align:left">журнал пуст</div>';
+  const sm=s.summary;
+  $('s4-equity').textContent = Math.round(sm.equity_rub).toLocaleString('ru');
+  $('s4-equity').style.color = sm.return_pct>=0?'var(--signal)':'var(--loss)';
+  $('s4-daypnl').textContent = s4money(sm.day_pnl_rub); $('s4-daypnl').style.color = sm.day_pnl_rub>=0?'var(--signal)':'var(--loss)';
+  $('s4-ntrades').textContent = sm.trades;
+  $('s4-winrate').textContent = sm.win_rate_pct+'%';
+  // HALTED-баннер
+  const halt=$('s4-halt');
+  if(s.halted){ halt.style.display=''; halt.textContent='⛔ HALTED: '+(s.halt_reason||'')+' — нажмите «сброс» после разбора'; }
+  else halt.style.display='none';
+  // позиция
+  const pos=$('s4-pos');
+  if(s.position){
+    const p=s.position; const u=p.unrealized_rub;
+    pos.innerHTML = `<div style="font-weight:600;color:${p.state==='short_spread'?'var(--short)':'var(--signal)'}">${p.state==='short_spread'?'ШОРТ спреда':'ЛОНГ спреда'} · ${p.lots} лот · держим ${p.bars_held} бар</div>`+
+      p.legs.map(l=>`<div style="margin-top:4px">${l.code} (${l.role}): <b>${l.side==='buy'?'лонг':'шорт'}</b> @ ${l.entry}</div>`).join('')+
+      `<div style="margin-top:6px">нереализованный P&L: <b style="color:${u>=0?'var(--signal)':'var(--loss)'}">${s4money(u)}</b></div>`;
+  } else pos.textContent='нет открытой позиции';
+  // ожидание подтверждения (ручной режим)
+  const pend=$('s4-pending'), crow=$('s4-confirm-row');
+  if(s.pending){ pend.style.display=''; pend.innerHTML=`<div style="color:var(--warn);font-weight:600">⏳ сигнал ${s.pending.signal.toUpperCase()} (спред ${Math.round(s.pending.spread)}, SMA ${Math.round(s.pending.sma)}) ждёт подтверждения</div>`; crow.style.display='flex'; }
+  else { pend.style.display='none'; crow.style.display='none'; }
+  // чекбоксы
+  $('s4-auto').checked=s.auto_approve; $('s4-trading').checked=s.trading_enabled;
+  // коннектор исполнения: режим (намерение) + бейдж факта (sandbox_active) + индикатор токена
+  const cm=$('s4-conn-mode'); if(cm && document.activeElement!==cm) cm.value=s.connector_mode||'paper';
+  const cbg=$('s4-conn-badge');
+  if(cbg){
+    const sandbox = s.connector_mode==='tbank_sandbox';
+    cbg.textContent = (sandbox?'T-Bank песочница':'paper')
+      + (sandbox ? (s.sandbox_active?' · активна':' · только в live') : '')
+      + (s.token_set?' · токен ✓':'');
+    cbg.style.color = (sandbox && s.sandbox_active) ? 'var(--signal)' : 'var(--ink-dim)';
+  }
+  const ctok=$('s4-conn-token');
+  if(ctok && document.activeElement!==ctok)
+    ctok.placeholder = s.token_set ? 'токен установлен (ввести заново для замены)' : 't.xxx (для sandbox)';
+  // кнопка паузы
+  $('s4-btn-pause').textContent = (s.live||s.player)?'❚❚ пауза':'▶ продолжить';
+  window._s4tradeStart = s.trade_start_ts || null;   // линия старта торговли на графике
+  s4DrawChart(s.history, s.trades, s.position);
+  s4RenderTrades(s.trades);
+}
+
+async function s4Poll(){ if(SLOT!==4) return; try{ s4Render(await s4api('/state')); }catch(e){} }
+
+function s4Init(){
+  // первичная подвязка обработчиков (один раз)
+  if(!_s4Started){
+    _s4Started=true;
+    // --- зум колесом / панорама перетаскиванием / dblclick-сброс на графике st4 ---
+    const s4cv=$('s4chart');
+    s4cv.addEventListener('wheel',e=>{
+      e.preventDefault();
+      if(_s4fullLen<2) return;
+      const k = e.deltaY<0 ? 0.85 : 1/0.85;
+      const nz = Math.min(1, Math.max(10/_s4fullLen, _s4zoom*k));
+      if(_s4panRight==null) _s4panRight=_s4fullLen;
+      _s4zoom=nz;
+      if(_s4zoom>=1){ _s4panRight=null; }
+      s4Redraw();
+    },{passive:false});
+    let s4drag=null;
+    s4cv.addEventListener('mousedown',e=>{ s4drag={x:e.clientX, panRight:_s4panRight==null?_s4fullLen:_s4panRight}; s4cv.style.cursor='grabbing'; });
+    addEventListener('mousemove',e=>{
+      if(!s4drag||_s4fullLen<2) return;
+      const W=s4cv.getBoundingClientRect().width;
+      const visN=Math.max(10,Math.round(_s4fullLen*_s4zoom));
+      const dxBars=Math.round((e.clientX-s4drag.x)/W*visN);
+      let nr=s4drag.panRight-dxBars;
+      nr=Math.max(visN,Math.min(_s4fullLen,nr));
+      _s4panRight = nr>=_s4fullLen ? null : nr;
+      s4Redraw();
+    });
+    addEventListener('mouseup',()=>{ if(s4drag){ s4drag=null; s4cv.style.cursor='crosshair'; } });
+    s4cv.addEventListener('dblclick',()=>{ s4ResetZoom(); s4Redraw(); });
+    s4cv.style.cursor='crosshair';
+    // tooltip при наведении: данные бара (спред/SMA/полосы/z) или сделки
+    s4cv.addEventListener('mousemove',e=>{
+      const g=window._s4geom, tip=$('s4tip'); if(!g||!tip){ return; }
+      const r=s4cv.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+      // ближайшая точка сделки (приоритет — у неё своя инфа)
+      let best=null,bd=14;
+      g.trades.forEach(p=>{
+        [['вход',p.xi,p.yi],['выход',p.xo,p.yo]].forEach(([kind,px,py])=>{
+          if(px==null) return; const d=Math.hypot(px-mx,py-my); if(d<bd){bd=d;best={kind,t:p.t};}
+        });
+      });
+      if(best){
+        const t=best.t, win=t.net_pnl_rub>=0;
+        const rs={exit:'возврат к SMA',stop:'стоп σ',time_stop:'тайм-стоп',flat_all:'flat-all'}[t.reason]||t.reason;
+        tip.innerHTML=`<b>${best.kind}</b> · ${t.state==='short_spread'?'шорт':'лонг'} спреда<br>`
+          +`спред ${Math.round(t.entry_spread)}→${Math.round(t.exit_spread)} · ${rs}<br>`
+          +`net <span style="color:${win?'var(--signal)':'var(--loss)'}">${s4money(t.net_pnl_rub)}</span>`;
+        tip.style.display='block'; s4PlaceTip(tip,mx,my,r);
+        return;
+      }
+      // иначе — данные бара под курсором (по X)
+      if(mx<g.px0||mx>g.px1||my<g.py0||my>g.py1){ tip.style.display='none'; return; }
+      const n=g.series.length, frac=(mx-g.px0)/(g.px1-g.px0);
+      const idx=Math.max(0,Math.min(n-1,Math.round(frac*(n-1)))), p=g.series[idx];
+      const z=p.sigma>0?((p.spread-p.sma)/p.sigma):0;
+      const m=s4msk(p.ts);
+      tip.innerHTML=`<b>${m.hh}:${m.mm}</b> МСК<br>спред <b>${Math.round(p.spread)}</b> · z ${z>=0?'+':''}${z.toFixed(2)}<br>`
+        +`SMA ${Math.round(p.sma)} · полосы [${Math.round(p.lower)}..${Math.round(p.upper)}]`;
+      tip.style.display='block'; s4PlaceTip(tip,mx,my,r);
+    });
+    s4cv.addEventListener('mouseleave',()=>{ const t=$('s4tip'); if(t)t.style.display='none'; });
+    $('s4-btn-live').onclick=async()=>{ try{ await s4api('/control/start','POST'); s4Poll(); }catch(e){alert(e.message);} };
+    $('s4-btn-player').onclick=async()=>{ await s4api('/player/start','POST'); s4Poll(); };
+    $('s4-btn-pause').onclick=async()=>{ const s=_s4snap||{}; if(s.live) await s4api('/control/stop','POST'); else if(s.player) await s4api('/player/stop','POST'); else await s4api(s.data_source==='live'?'/control/start':'/player/start','POST'); s4Poll(); };
+    $('s4-btn-flat').onclick=async()=>{ if(!confirm('Закрыть позицию по рынку (flat-all)?')) return; await s4api('/control/flat-all','POST',{confirm:true}); s4Poll(); };
+    $('s4-btn-reset').onclick=async()=>{ if(!confirm('Сбросить сессию st4 (журнал/баланс)?')) return; await s4api('/reset','POST'); s4Poll(); };
+    $('s4-auto').onchange=async(e)=>{ await s4api('/auto?on='+e.target.checked,'POST'); s4Poll(); };
+    $('s4-trading').onchange=async(e)=>{ await s4api('/control/trading?on='+e.target.checked,'POST'); s4Poll(); };
+    $('s4-btn-approve').onclick=async()=>{ await s4api('/approve','POST'); s4Poll(); };
+    $('s4-btn-reject').onclick=async()=>{ await s4api('/reject','POST'); s4Poll(); };
+    $('s4-btn-conn').onclick=async()=>{
+      const mode=$('s4-conn-mode').value, token=$('s4-conn-token').value.trim();
+      $('s4-conn-msg').textContent='применяю…';
+      try{
+        const body={mode}; if(token) body.token=token;
+        const d=await s4api('/connector','POST',body);
+        $('s4-conn-token').value='';                  // не держим токен в DOM
+        $('s4-conn-msg').textContent = d.fell_back
+          ? 'sandbox недоступен — исполнение paper'
+          : ('режим: '+d.connector_mode+(d.token_set?' · токен установлен ✓':''));
+        s4Poll();
+      }catch(e){ $('s4-conn-msg').textContent='ошибка: '+e.message; }
+    };
+    $('s4-btn-forget').onclick=async()=>{
+      if(!confirm('Удалить сохранённый токен T-Bank с диска?')) return;
+      try{ await s4api('/connector/forget-token','POST'); $('s4-conn-msg').textContent='токен удалён, режим paper'; s4Poll(); }
+      catch(e){ $('s4-conn-msg').textContent='ошибка: '+e.message; }
+    };
+    $('s4-btn-apply').onclick=async()=>{
+      const body={ sma_period:+$('s4-p-sma').value, sigma_multiplier:+$('s4-p-sig').value,
+        deviation_pct:(+$('s4-p-dev').value)/100, stop_sigma:+$('s4-p-stop').value, quantity_lots:+$('s4-p-lots').value };
+      try{ await s4api('/config','POST',body); s4Poll(); }catch(e){ alert(e.message); }
+    };
+    $('s4-btn-bt').onclick=async()=>{
+      const days=+$('s4-bt-days').value, stop=+$('s4-bt-stop').value;
+      $('s4-bt-msg').textContent='загрузка истории ISS…'; $('s4-btn-bt').disabled=true;
+      try{
+        const d=await s4api(`/backtest?days=${days}&stop_sigma=${stop}`);
+        if(d.error){ $('s4-bt-msg').textContent=d.error; }
+        else{
+          $('s4-bt-msg').textContent='';
+          $('s4-bt-res').innerHTML=
+            `<b>${d.legs.ord}/${d.legs.pref}</b> · ${d.bars} баров · сделок <b>${d.trades}</b><br>`+
+            `win-rate <b style="color:var(--signal)">${d.win_rate_pct}%</b> · net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s4money(d.net_pnl_rub)}</b> (${fmt(d.return_pct,2)}%)<br>`+
+            `<b>maxDD ${d.max_drawdown_pct}%</b> · стопов ${d.stops} · ср.P&L ${s4money(d.avg_pnl_rub)} · ср.держание ${d.avg_bars_held} бар (макс ${d.max_bars_held})<br>`+
+            `ср.проскальзывание ${d.avg_slippage_ticks}t · комиссии ${s4money(-d.fees_rub)}`+
+            (d.open_position?`<br><span style="color:var(--warn)">осталась открытая ${d.open_position}: нереализ ${s4money(d.open_unrealized_rub)}</span>`:'');
+          s4RenderBtHistoryMoex(d.history||[]);
+        }
+      }catch(e){ $('s4-bt-msg').textContent='ошибка: '+e.message; }
+      $('s4-btn-bt').disabled=false;
+    };
+    $('s4-btn-btb').onclick=async()=>{
+      const stop=+$('s4-btb-stop').value;
+      $('s4-btb-msg').textContent='загрузка котировок T-Bank…'; $('s4-btn-btb').disabled=true;
+      $('s4-btb-table-wrap').style.display='none';
+      try{
+        const d=await s4api(`/backtest_tbank?stop_sigma=${stop}`);
+        if(d.error){ $('s4-btb-msg').textContent=d.error; $('s4-btb-res').innerHTML=''; }
+        else{
+          $('s4-btb-msg').textContent='';
+          $('s4-btb-res').innerHTML=
+            `<b>${d.legs.ord}/${d.legs.pref}</b> · ${d.bars} баров (${d.source}) · сделок <b>${d.trades}</b><br>`+
+            `win-rate <b style="color:var(--signal)">${d.win_rate_pct}%</b> · net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s4money(d.net_pnl_rub)}</b> (${fmt(d.return_pct,2)}%)<br>`+
+            `<b>maxDD ${d.max_drawdown_pct}%</b> · стопов ${d.stops} · ср.держание ${d.avg_bars_held} бар (макс ${d.max_bars_held})<br>`+
+            `ср.проскальзывание ${d.avg_slippage_ticks}t · комиссии ${s4money(-d.fees_rub)}`+
+            (d.open_position?`<br><span style="color:var(--warn)">осталась открытая ${d.open_position}: нереализ ${s4money(d.open_unrealized_rub)}</span>`:'');
+          // таблица сделок
+          const tb=$('s4-btb-table').querySelector('tbody'); tb.innerHTML='';
+          const trs=d.trades_detail||[];
+          if(trs.length){
+            $('s4-btb-table-wrap').style.display='';
+            trs.slice().reverse().forEach(t=>{
+              const dir = t.state==='short_spread' ? '<span style="color:var(--short)">шорт спреда</span>' : '<span style="color:var(--signal)">лонг спреда</span>';
+              const reason={exit:'возврат к SMA',stop:'стоп σ',time_stop:'тайм-стоп',flat_all:'flat-all'}[t.reason]||t.reason;
+              const tr=document.createElement('tr');
+              tr.innerHTML=`<td>${dir}</td><td>${Math.round(t.entry_spread)} → ${Math.round(t.exit_spread)}</td>`+
+                `<td>${t.bars_held}</td><td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(t.net_pnl_rub)}</td>`+
+                `<td style="color:var(--ink-dim)">${reason}</td>`;
+              tb.appendChild(tr);
+            });
+          }
+          s4RenderBtHistory(d.history||[]);
+        }
+      }catch(e){ $('s4-btb-msg').textContent='ошибка: '+e.message; }
+      $('s4-btn-btb').disabled=false;
+    };
+    $('s4-btn-tests').onclick=async()=>{
+      $('s4-tests-badge').textContent='запуск…';
+      try{ const d=await s4api('/tests'); $('s4-tests-badge').innerHTML = d.ok? `<span style="color:var(--signal)">✓ ${d.passed} passed</span>` : `<span style="color:var(--loss)">${d.failed} failed / ${d.passed} passed</span>`; }
+      catch(e){ $('s4-tests-badge').textContent='ошибка'; }
+    };
+    $('s4-btn-margin').onclick=s4LoadMargin;
+  }
+  s4Poll();
+  s4LoadMargin();   // подгрузить расчёт ГО при открытии вкладки
+  // автозапуск демо, если сессии ещё не было
+  s4api('/state').then(s=>{ if(!s.session_started){ s4api('/player/start','POST').then(s4Poll); } });
+  // загрузить историю прогонов бэктеста
+  s4api('/backtest_history').then(d=>s4RenderBtHistory(d.history||[])).catch(()=>{});
+  s4api('/backtest_history?source=moex').then(d=>s4RenderBtHistoryMoex(d.history||[])).catch(()=>{});
+}
+
 /* ===== СТАРТ ===== */
-resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history);});
+resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history); if(SLOT===4)s4Redraw();});
 (async()=>{
   markSlot();
   if(SLOT===3){ momInit(); }
+  else if(SLOT===4){ s4Init(); }
   else { await initSession(); }
-  setInterval(()=>{ if(SLOT!==3) poll(); }, POLL_MS);
+  setInterval(()=>{ if(SLOT!==3 && SLOT!==4) poll(); }, POLL_MS);
+  setInterval(()=>{ if(SLOT===4) s4Poll(); }, 1500);
 })();
 </script>
 </body>

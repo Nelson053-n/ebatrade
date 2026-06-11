@@ -19,6 +19,10 @@ infra/
 session_state.json
 session_state_*.json
 
+# токен T-Bank (секрет, НИКОГДА не коммитить)
+.tbank_token
+pairsignal/st4/.tbank_token
+
 # результаты прогонов и live-состояние momentum (рантайм-артефакты)
 pairsignal/out/
 
