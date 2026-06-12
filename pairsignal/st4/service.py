@@ -21,22 +21,30 @@ from .models import InstrumentSpec, Role
 from .tbank_sandbox import has_token as _has_token
 
 _BASE = Path(__file__).resolve().parent.parent.parent
-_SESSION_FILE = _BASE / "session_state_4.json"
 _OUT_DIR = _BASE / "pairsignal" / "out"
 HISTORY_LEN = 300
 EVENTS_LEN = 40             # сколько последних действий держим в журнале бота
 BT_HISTORY_LEN = 60        # сколько прогонов бэктеста храним
 
+# пары обычка/преф, доступные как независимые форвард-тест сессии st4.
+# ключ — идентификатор в API (?pair=), значение — (ASSETCODE обычки, префа, ярлык)
+ST4_PAIRS: dict[str, tuple[str, str, str]] = {
+    "sber": ("SBRF", "SBPR", "Сбербанк"),
+    "tatn": ("TATN", "TATP", "Татнефть"),
+}
 
-def _bt_history_file(source: str) -> Path:
-    """Файл истории прогонов по источнику: tbank | moex (разные периоды/данные)."""
-    name = "st4_backtest_history.json" if source == "tbank" else f"st4_backtest_{source}_history.json"
+
+def _bt_history_file(source: str, pair: str = "sber") -> Path:
+    """Файл истории прогонов по источнику и паре. Для sber — старые имена (совместимость)."""
+    suffix = "" if pair == "sber" else f"_{pair}"
+    name = (f"st4_backtest{suffix}_history.json" if source == "tbank"
+            else f"st4_backtest{suffix}_{source}_history.json")
     return _OUT_DIR / name
 
 
-def bt_history_load(source: str = "tbank") -> list[dict]:
+def bt_history_load(source: str = "tbank", pair: str = "sber") -> list[dict]:
     """История прогонов бэктеста по источнику (для отслеживания результативности во времени)."""
-    f = _bt_history_file(source)
+    f = _bt_history_file(source, pair)
     try:
         if f.exists():
             return json.loads(f.read_text())
@@ -45,15 +53,15 @@ def bt_history_load(source: str = "tbank") -> list[dict]:
     return []
 
 
-def bt_history_append(entry: dict, source: str = "tbank") -> list[dict]:
+def bt_history_append(entry: dict, source: str = "tbank", pair: str = "sber") -> list[dict]:
     """Добавить прогон в историю источника (дедуп по дню+stop_sigma — не плодим за один день)."""
-    hist = bt_history_load(source)
+    hist = bt_history_load(source, pair)
     day = entry.get("date", "")[:10]
     ss = entry.get("stop_sigma")
     hist = [h for h in hist if not (h.get("date", "")[:10] == day and h.get("stop_sigma") == ss)]
     hist.append(entry)
     hist = hist[-BT_HISTORY_LEN:]
-    f = _bt_history_file(source)
+    f = _bt_history_file(source, pair)
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(hist))
@@ -74,10 +82,19 @@ def _clean(obj):
 
 
 class St4Session:
-    """Полное состояние торговой сессии st4 (один экземпляр на процесс)."""
+    """Полное состояние торговой сессии st4 (один экземпляр на ПАРУ обычка/преф)."""
 
-    def __init__(self) -> None:
+    def __init__(self, pair: str = "sber") -> None:
+        if pair not in ST4_PAIRS:
+            raise ValueError(f"неизвестная пара st4: {pair}")
+        self.pair = pair
+        asset_ord, asset_pref, self.pair_label = ST4_PAIRS[pair]
+        # sber пишет в исторический session_state_4.json (совместимость со старыми сессиями)
+        suffix = "" if pair == "sber" else f"_{pair}"
+        self._session_file = _BASE / f"session_state_4{suffix}.json"
         self.cfg = St4Config()
+        self.cfg.instruments.asset_ordinary = asset_ord
+        self.cfg.instruments.asset_preferred = asset_pref
         self.spec_ord: InstrumentSpec = feed.synthetic_spec(Role.ORDINARY)
         self.spec_pref: InstrumentSpec = feed.synthetic_spec(Role.PREFERRED)
         self.engine = TradingEngine(self.cfg, self.spec_ord, self.spec_pref)
@@ -234,7 +251,7 @@ class St4Session:
                 "paused_by_user": self.state["paused_by_user"],
                 "last_live_ts": self.last_live_ts,
             }
-            _SESSION_FILE.write_text(json.dumps(_clean(data)))
+            self._session_file.write_text(json.dumps(_clean(data)))
         except Exception:  # noqa: BLE001
             pass
 
@@ -245,10 +262,10 @@ class St4Session:
         return d
 
     def load_session(self) -> bool:
-        if not _SESSION_FILE.exists():
+        if not self._session_file.exists():
             return False
         try:
-            data = json.loads(_SESSION_FILE.read_text())
+            data = json.loads(self._session_file.read_text())
         except Exception:  # noqa: BLE001
             return False
         try:
@@ -464,9 +481,11 @@ class St4Session:
                    "lots": p.leg_ord.lots, "unrealized_rub": round(eng.unrealized_rub(), 0),
                    "bars_held": eng._bars_held,
                    "legs": [
-                       {"code": p.leg_ord.code, "role": "SBRF", "side": p.leg_ord.side,
+                       {"code": p.leg_ord.code, "role": self.cfg.instruments.asset_ordinary,
+                        "side": p.leg_ord.side,
                         "lots": p.leg_ord.lots, "entry": round(p.leg_ord.entry_price, 0)},
-                       {"code": p.leg_pref.code, "role": "SBPR", "side": p.leg_pref.side,
+                       {"code": p.leg_pref.code, "role": self.cfg.instruments.asset_preferred,
+                        "side": p.leg_pref.side,
                         "lots": p.leg_pref.lots, "entry": round(p.leg_pref.entry_price, 0)},
                    ]}
         pending = None
@@ -545,6 +564,11 @@ class St4Session:
             "last_bar_ts": last_bar_ts or None,
             "warmup_done": bool(b and b.is_ready), # прогрет ли индикатор
             "trade_start_ts": self.state.get("trade_start_ts"),  # граница backfill→live торговля
-            "strategy_name": "Спред SBRF/SBPR · Bollinger(%d, %gσ)" % (
+            "pair": self.pair,                     # идентификатор пары (?pair=)
+            "pair_label": self.pair_label,         # «Сбербанк» / «Татнефть»
+            "asset_ord": self.cfg.instruments.asset_ordinary,
+            "asset_pref": self.cfg.instruments.asset_preferred,
+            "strategy_name": "Спред %s/%s · Bollinger(%d, %gσ)" % (
+                self.cfg.instruments.asset_ordinary, self.cfg.instruments.asset_preferred,
                 self.cfg.strategy.sma_period, self.cfg.strategy.sigma_multiplier),
         })

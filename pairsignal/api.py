@@ -339,20 +339,29 @@ async def _player(st: SlotState):
 
 from .st4 import data_feed as feed   # noqa: E402  st4 — FSM-арбитраж SBRF/SBPR
 from .st4.backtest import band_frame_for_chart, run_backtest  # noqa: E402
-from .st4.service import St4Session   # noqa: E402
+from .st4.service import ST4_PAIRS, St4Session   # noqa: E402
 
-ST4 = St4Session()
+# независимая форвард-тест сессия на каждую пару обычка/преф (?pair=sber|tatn)
+ST4S: dict[str, St4Session] = {p: St4Session(p) for p in ST4_PAIRS}
+ST4 = ST4S["sber"]                    # пара по умолчанию (совместимость)
+
+
+def _st4(pair: str = "sber") -> St4Session:
+    if pair not in ST4S:
+        raise HTTPException(400, "pair: " + " | ".join(ST4S))
+    return ST4S[pair]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     for st in SLOTS:
         st.load_session()             # восстановить результаты прошлой сессии (если есть)
-    ST4.load_session()
     from .st4 import tbank_sandbox as _sb
     _sb.load_token()                  # подтянуть сохранённый токен T-Bank (переживает рестарт)
-    if ST4.state.pop("resume_live", False):
-        asyncio.create_task(_st4_autoresume())   # автостарт: live шёл до рестарта
+    for s4 in ST4S.values():
+        s4.load_session()
+        if s4.state.pop("resume_live", False):
+            asyncio.create_task(_st4_autoresume(s4))   # автостарт: live шёл до рестарта
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())   # авто-бэктест раз в ~2.5 дня
     yield
     _auto_bt_task.cancel()
@@ -360,9 +369,10 @@ async def lifespan(app: FastAPI):
         st.save_session()             # сохранить при остановке сервера
         st.state["live"] = False
         st.state["player"] = False
-    ST4.save_session()
-    ST4.state["live"] = False
-    ST4.state["player"] = False
+    for s4 in ST4S.values():
+        s4.save_session()
+        s4.state["live"] = False
+        s4.state["player"] = False
 
 
 app = FastAPI(title="pairsignal", version="0.1", lifespan=lifespan)
@@ -910,21 +920,22 @@ _MSK = _tz(_td(hours=3))  # московское время для меток st
 
 
 @app.get("/st4/state")
-def st4_state():
-    return ST4.snapshot(_server_started)
+def st4_state(pair: str = "sber"):
+    return _st4(pair).snapshot(_server_started)
 
 
 @app.get("/st4/config")
-def st4_config():
-    return ST4.cfg.model_dump()
+def st4_config(pair: str = "sber"):
+    return _st4(pair).cfg.model_dump()
 
 
 @app.post("/st4/config")
-async def st4_set_config(payload: dict):
+async def st4_set_config(payload: dict, pair: str = "sber"):
     """Обновить параметры стратегии/риска/исполнения (валидация) и сбросить сессию.
 
     Если до применения был активен live/демо — автоматически перезапускаем его с новыми
     параметрами (чтобы не нажимать «live» вручную после каждого изменения)."""
+    ST4 = _st4(pair)
     s = ST4.cfg.strategy
     r = ST4.cfg.risk
     e = ST4.cfg.execution
@@ -993,10 +1004,10 @@ async def st4_set_config(payload: dict):
             "was_player": was_player, "restarted": was_live or was_player}
 
 
-async def _st4_autoresume():
+async def _st4_autoresume(ST4: St4Session):
     """Автостарт live после рестарта сервера: ПРОДОЛЖАЕМ сессию без сброса журнала.
 
-    Вызывается из lifespan, когда сохранённая сессия была в live и не остановлена
+    Вызывается из lifespan для каждой пары, чья сессия была в live и не остановлена
     оператором. Paper: восстановленный движок продолжает (BB прогревается в run_live
     по last_live_ts). Sandbox: исполнителю нужен счёт — полный старт через reset_engine.
     """
@@ -1023,9 +1034,10 @@ async def _st4_autoresume():
 
 
 @app.post("/st4/control/start")
-async def st4_start():
+async def st4_start(pair: str = "sber"):
     """Запустить live. Тяжёлый старт (резолв серий + sandbox-счёт + pay_in) — в фоне,
     чтобы HTTP-ответ вернулся сразу, а не висел десятки секунд (sandbox делает сетевые вызовы)."""
+    ST4 = _st4(pair)
     if ST4.state["live"]:
         return {"ok": True, "already": True}
     ST4.state["player"] = False
@@ -1044,7 +1056,8 @@ async def st4_start():
 
 
 @app.post("/st4/control/stop")
-def st4_stop():
+def st4_stop(pair: str = "sber"):
+    ST4 = _st4(pair)
     ST4.state["live"] = False
     ST4.state["paused_by_user"] = True   # намеренная остановка — автостарт не возобновляет
     ST4.save_session()   # зафиксировать флаги: иначе крэш до следующего save возобновит live
@@ -1052,8 +1065,9 @@ def st4_stop():
 
 
 @app.post("/st4/player/start")
-async def st4_player_start(limit: int = 1500):
+async def st4_player_start(limit: int = 1500, pair: str = "sber"):
     """Запустить/возобновить синтетический плеер (офлайн-демо FSM)."""
+    ST4 = _st4(pair)
     if ST4.state["player"]:
         return {"ok": True, "already": True}
     ST4.state["live"] = False
@@ -1072,15 +1086,17 @@ async def st4_player_start(limit: int = 1500):
 
 
 @app.post("/st4/player/stop")
-def st4_player_stop():
+def st4_player_stop(pair: str = "sber"):
+    ST4 = _st4(pair)
     ST4.state["player"] = False
     ST4.state["paused_by_user"] = True
     return {"ok": True}
 
 
 @app.post("/st4/control/flat-all")
-def st4_flat_all(payload: dict | None = None):
+def st4_flat_all(payload: dict | None = None, pair: str = "sber"):
     """Паник-закрытие позиции по рынку (требует confirm=true в теле, §12.1)."""
+    ST4 = _st4(pair)
     if not payload or not payload.get("confirm"):
         raise HTTPException(400, "нужно подтверждение: {\"confirm\": true}")
     trade = ST4.engine.flat_all("flat_all")
@@ -1090,15 +1106,17 @@ def st4_flat_all(payload: dict | None = None):
 
 
 @app.post("/st4/control/trading")
-def st4_trading(on: bool = True):
+def st4_trading(on: bool = True, pair: str = "sber"):
     """Глобальный флаг новых входов (TradingEnabled, §11)."""
+    ST4 = _st4(pair)
     ST4.cfg.risk.trading_enabled = on
     return {"ok": True, "trading_enabled": on}
 
 
 @app.post("/st4/control/resume")
-def st4_resume():
+def st4_resume(pair: str = "sber"):
     """Снять HALTED после ручного разбора (§11)."""
+    ST4 = _st4(pair)
     ST4.engine.risk.resume()
     from .st4.models import BotState
     if ST4.engine.state == BotState.HALTED:
@@ -1107,7 +1125,8 @@ def st4_resume():
 
 
 @app.post("/st4/approve")
-def st4_approve():
+def st4_approve(pair: str = "sber"):
+    ST4 = _st4(pair)
     if ST4.engine._pending is None:
         raise HTTPException(400, "нет ожидающей рекомендации")
     ST4.engine.approve()
@@ -1116,13 +1135,15 @@ def st4_approve():
 
 
 @app.post("/st4/reject")
-def st4_reject():
+def st4_reject(pair: str = "sber"):
+    ST4 = _st4(pair)
     ST4.engine.reject()
     return {"ok": True}
 
 
 @app.post("/st4/auto")
-def st4_auto(on: bool = True):
+def st4_auto(on: bool = True, pair: str = "sber"):
+    ST4 = _st4(pair)
     ST4.cfg.auto_approve = on
     if on and ST4.engine._pending is not None:
         ST4.engine.approve()
@@ -1131,13 +1152,14 @@ def st4_auto(on: bool = True):
 
 
 @app.post("/st4/reset")
-def st4_reset():
+def st4_reset(pair: str = "sber"):
+    ST4 = _st4(pair)
     ST4.reset_engine(real=(ST4.state["data_source"] == "live"))
     return {"ok": True}
 
 
 @app.post("/st4/connector")
-def st4_connector(payload: dict):
+def st4_connector(payload: dict, pair: str = "sber"):
     """Установить режим исполнителя (paper|tbank_sandbox) и (опц.) API-токен T-Bank.
 
     Токен сохраняется в файл .tbank_token (0600, в .gitignore — не в git) и в env процесса,
@@ -1146,6 +1168,7 @@ def st4_connector(payload: dict):
     """
     from .st4 import tbank_sandbox as _sb
 
+    ST4 = _st4(pair)
     mode = payload.get("mode")
     if mode not in ("paper", "tbank_sandbox"):
         raise HTTPException(400, "mode: paper | tbank_sandbox")
@@ -1169,22 +1192,27 @@ def st4_connector(payload: dict):
 
 @app.post("/st4/connector/forget-token")
 def st4_forget_token():
-    """Удалить сохранённый токен (из файла и env). Откатить в paper."""
+    """Удалить сохранённый токен (из файла и env). Откатить в paper ВСЕ пары (токен общий)."""
     from .st4 import tbank_sandbox as _sb
     _sb.save_token("")                               # пусто → удаляет файл + env
-    ST4.cfg.connector.mode = "paper"
-    ST4.reset_engine(real=(ST4.state["data_source"] == "live"))
+    for s4 in ST4S.values():
+        if s4.cfg.connector.mode != "paper":
+            s4.cfg.connector.mode = "paper"
+            s4.reset_engine(real=(s4.state["data_source"] == "live"))
     return {"ok": True, "token_set": False, "connector_mode": "paper"}
 
 
 @app.get("/st4/trades")
-def st4_trades():
+def st4_trades(pair: str = "sber"):
+    ST4 = _st4(pair)
     return {"trades": [ST4._trade_json(t) for t in ST4.engine.trades]}
 
 
 @app.get("/st4/backtest")
-async def st4_backtest(days: int = 90, stop_sigma: float | None = None):
+async def st4_backtest(days: int = 90, stop_sigma: float | None = None, pair: str = "sber"):
     """Бэктест на реальной истории MOEX ISS за period (honest: maxDD по equity)."""
+    ST4 = _st4(pair)
+
     def _run() -> dict:
         # спецификации ног резолвим ЛОКАЛЬНО: бэктест не должен трогать живую сессию
         # (resolve_real_legs перезаписывает ST4.spec_ord/spec_pref)
@@ -1217,13 +1245,13 @@ async def st4_backtest(days: int = 90, stop_sigma: float | None = None):
             "net_pnl_rub": res["net_pnl_rub"], "return_pct": res["return_pct"],
             "max_drawdown_pct": res["max_drawdown_pct"], "stops": res["stops"],
         }
-        res["history"] = bt_history_append(entry, source="moex")
+        res["history"] = bt_history_append(entry, source="moex", pair=ST4.pair)
         return res
 
     return _clean(await asyncio.to_thread(_run))
 
 
-def _run_backtest_tbank(stop_sigma: float | None) -> dict:
+def _run_backtest_tbank(stop_sigma: float | None, ST4: St4Session) -> dict:
     """Прогон бэктеста на T-Bank-свечах за неделю + запись в историю. Блокирующий (to_thread)."""
     from .st4 import tbank_sandbox as _sb
     if not _sb.has_token():
@@ -1256,14 +1284,14 @@ def _run_backtest_tbank(stop_sigma: float | None) -> dict:
         "net_pnl_rub": res["net_pnl_rub"], "return_pct": res["return_pct"],
         "max_drawdown_pct": res["max_drawdown_pct"], "stops": res["stops"],
     }
-    res["history"] = bt_history_append(entry)
+    res["history"] = bt_history_append(entry, pair=ST4.pair)
     return res
 
 
 @app.get("/st4/backtest_tbank")
-async def st4_backtest_tbank(stop_sigma: float | None = None):
+async def st4_backtest_tbank(stop_sigma: float | None = None, pair: str = "sber"):
     """Бэктест на РЕАЛЬНЫХ котировках T-Bank за неделю (тот же источник, что sandbox-ордера)."""
-    return _clean(await asyncio.to_thread(_run_backtest_tbank, stop_sigma))
+    return _clean(await asyncio.to_thread(_run_backtest_tbank, stop_sigma, _st4(pair)))
 
 
 async def _auto_backtest_loop():
@@ -1277,22 +1305,23 @@ async def _auto_backtest_loop():
         try:
             from .st4 import tbank_sandbox as _sb
             if _sb.has_token():
-                res = await _aio.to_thread(_run_backtest_tbank, None)
-                if "error" not in res:
-                    ST4.log_event("info", f"авто-бэктест T-Bank: сделок {res['trades']}, "
-                                  f"net {res['net_pnl_rub']:+.0f}₽, win {res['win_rate_pct']}%")
+                for s4 in ST4S.values():
+                    res = await _aio.to_thread(_run_backtest_tbank, None, s4)
+                    if "error" not in res:
+                        s4.log_event("info", f"авто-бэктест T-Bank: сделок {res['trades']}, "
+                                     f"net {res['net_pnl_rub']:+.0f}₽, win {res['win_rate_pct']}%")
         except Exception:  # noqa: BLE001
             pass
         await _aio.sleep(2.5 * 24 * 3600)  # раз в 2.5 дня
 
 
 @app.get("/st4/backtest_history")
-def st4_backtest_history(source: str = "tbank"):
+def st4_backtest_history(source: str = "tbank", pair: str = "sber"):
     """История прогонов бэктеста (source: tbank | moex) — результативность во времени."""
     from .st4.service import bt_history_load
     if source not in ("tbank", "moex"):
         raise HTTPException(400, "source: tbank | moex")
-    return {"history": bt_history_load(source)}
+    return {"history": bt_history_load(source, _st4(pair).pair)}
 
 
 # --- скан пар обычка/преф FORTS (отдельная страница-отчёт) ---
@@ -1322,8 +1351,9 @@ def st4_scan_report():
 
 
 @app.post("/st4/scan/run")
-async def st4_scan_run(days: int = 60, stop_sigma: float | None = None):
+async def st4_scan_run(days: int = 60, stop_sigma: float | None = None, pair: str = "sber"):
     """Запустить скан в фоне (ISS медленный — минуты). Параметры стратегии — текущие st4."""
+    ST4 = _st4(pair)
     if _ST4_SCAN["running"]:
         return {"ok": True, "already": True}
     _ST4_SCAN["running"] = True
@@ -1345,12 +1375,14 @@ async def st4_scan_run(days: int = 60, stop_sigma: float | None = None):
 
 
 @app.get("/st4/margin")
-async def st4_margin():
+async def st4_margin(pair: str = "sber"):
     """Гарантийное обеспечение пары SRM6+SPM6 и расчёт для 1/5/10/100 контрактов.
 
     ГО — INITIALMARGIN из ISS (актуальное, меняется ежедневно). Для парной позиции биржа
     обычно даёт скидку (ноги коррелированы) — показываем ГО без скидки (верхняя граница).
     """
+    ST4 = _st4(pair)
+
     def _run() -> dict:
         try:
             ST4.resolve_real_legs()

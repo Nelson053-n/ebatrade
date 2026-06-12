@@ -329,14 +329,20 @@ tr:hover td{background:rgba(255,255,255,.015)}
   <!-- ST4: арбитраж спреда SBRF/SBPR (FORTS) — отдельная панель, скрыта по умолчанию -->
   <div id="st4panel" style="display:none">
     <div class="panel fade" style="margin-bottom:14px">
-      <h2>st4 · Спред-арбитраж SBRF / SBPR <em>фьючерсы Сбербанка, FORTS · Bollinger(200, 2σ)</em></h2>
+      <h2 id="s4-title">st4 · Спред-арбитраж SBRF / SBPR <em id="s4-title-sub">фьючерсы Сбербанка, FORTS · Bollinger(200, 2σ)</em></h2>
+      <!-- переключатель пары (независимые форвард-тест сессии) -->
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+        <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--ink-faint)">пара</span>
+        <button class="ctrl-btn" id="s4-pair-sber" data-pair="sber">Сбербанк · SBRF/SBPR</button>
+        <button class="ctrl-btn" id="s4-pair-tatn" data-pair="tatn">Татнефть · TATN/TATP</button>
+        <button class="ctrl-btn" style="margin-left:auto" onclick="window.open('/st4/report','_blank')">📊 скан пар → отчёт</button>
+      </div>
       <!-- часы МСК + режим работы биржи FORTS -->
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:12px">
         <span style="padding:5px 12px;border-radius:7px;background:var(--bg);border:1px solid var(--line);font-weight:600">
           🕐 <span id="s4-msk-clock">—</span> МСК</span>
         <span id="s4-session" style="padding:5px 12px;border-radius:7px;background:var(--bg);border:1px solid var(--line)">сессия: —</span>
         <span style="color:var(--ink-faint)">FORTS: утро 09:00–10:00 · основная 10:00–14:00 / 14:05–18:45 · вечер 19:05–23:50 (клиринги 14:00 и 18:45)</span>
-        <a href="/st4/report" target="_blank" style="margin-left:auto;padding:6px 14px;border-radius:7px;background:rgba(46,230,166,.14);border:1px solid var(--signal);color:var(--signal);font-weight:700;text-decoration:none;box-shadow:var(--glow) rgba(46,230,166,.22)">📊 Скан пар обычка/преф → отчёт</a>
       </div>
       <details style="font-size:13px;line-height:1.75;color:var(--ink-dim)">
         <summary style="cursor:pointer;color:var(--signal);font-weight:600;font-size:12px;user-select:none">ⓘ о стратегии</summary>
@@ -1573,10 +1579,12 @@ $('btnMTests').onclick=async()=>{
 
 /* ===== ST4: СПРЕД-АРБИТРАЖ SBRF/SBPR ===== */
 let _s4snap=null, _s4Timer=null, _s4Started=false;
+let S4PAIR = localStorage.getItem('s4pair')||'sber';   // активная пара st4 (sber|tatn)
 async function s4api(path, method='GET', body=null){
   const opt={method};
   if(body!==null){ opt.headers={'Content-Type':'application/json'}; opt.body=JSON.stringify(body); }
-  const r=await fetch(API+'/st4'+path, opt);
+  const sep = path.includes('?') ? '&' : '?';
+  const r=await fetch(API+'/st4'+path+sep+'pair='+S4PAIR, opt);
   if(!r.ok){ let d=''; try{d=(await r.json()).detail||'';}catch(e){} throw new Error(d||(path+' → '+r.status)); }
   return r.json();
 }
@@ -1882,6 +1890,13 @@ function s4Render(s){
   else { dotColor='var(--signal)'; }   // прогрет, торгует/ждёт сигнал
   $('s4-status-dot').style.background=dotColor;
   $('s4-status-txt').textContent=statusTxt;
+  // заголовки вкладки/графика — по активной паре (sber/tatn)
+  if(s.asset_ord){
+    $('s4-title').childNodes[0].nodeValue=`st4 · Спред-арбитраж ${s.asset_ord} / ${s.asset_pref} `;
+    $('s4-title-sub').textContent=`фьючерсы ${s.pair_label||''}, FORTS · Bollinger(${s.sma_period}, ${s.sigma_mult}σ)`;
+    const csub=$('s4-chart-sub');
+    if(csub) csub.parentNode.childNodes[0].nodeValue=`Спред ${s.asset_pref} − ${s.asset_ord} `;
+  }
   // подпись под статусом: стратегия + лаг данных
   let sub = s.strategy_name||'';
   if(s.data_source==='live' && s.data_lag_min!=null) sub += ` · последний бар ${s.data_lag_min} мин назад`;
@@ -1940,6 +1955,25 @@ function s4Render(s){
 }
 
 async function s4Poll(){ if(SLOT!==4) return; try{ s4Render(await s4api('/state')); }catch(e){} }
+
+/* --- переключатель пары st4 (sber|tatn): независимые сессии на сервере --- */
+function s4MarkPair(){
+  ['sber','tatn'].forEach(p=>{ const b=$('s4-pair-'+p); if(b) b.classList.toggle('approve', S4PAIR===p); });
+}
+function s4LoadPairData(){
+  s4LoadMargin();
+  s4api('/backtest_history').then(d=>s4RenderBtHistory(d.history||[])).catch(()=>{});
+  s4api('/backtest_history?source=moex').then(d=>s4RenderBtHistoryMoex(d.history||[])).catch(()=>{});
+}
+async function s4SwitchPair(p){
+  if(p===S4PAIR) return;
+  S4PAIR=p; try{ localStorage.setItem('s4pair',p); }catch(e){}
+  s4MarkPair(); s4ResetZoom();
+  $('s4-bt-res').innerHTML=''; $('s4-bt-msg').textContent='';
+  $('s4-btb-res').innerHTML=''; $('s4-btb-msg').textContent='';
+  $('s4-btb-table-wrap').style.display='none';
+  await s4Poll(); s4LoadPairData();
+}
 
 function s4Init(){
   // первичная подвязка обработчиков (один раз)
@@ -2095,14 +2129,14 @@ function s4Init(){
       catch(e){ $('s4-tests-badge').textContent='ошибка'; }
     };
     $('s4-btn-margin').onclick=s4LoadMargin;
+    $('s4-pair-sber').onclick=()=>s4SwitchPair('sber');
+    $('s4-pair-tatn').onclick=()=>s4SwitchPair('tatn');
   }
+  s4MarkPair();
   s4Poll();
-  s4LoadMargin();   // подгрузить расчёт ГО при открытии вкладки
+  s4LoadPairData();   // ГО + истории прогонов активной пары
   // автозапуск демо, если сессии ещё не было
   s4api('/state').then(s=>{ if(!s.session_started){ s4api('/player/start','POST').then(s4Poll); } });
-  // загрузить историю прогонов бэктеста
-  s4api('/backtest_history').then(d=>s4RenderBtHistory(d.history||[])).catch(()=>{});
-  s4api('/backtest_history?source=moex').then(d=>s4RenderBtHistoryMoex(d.history||[])).catch(()=>{});
 }
 
 /* ===== СТАРТ ===== */
