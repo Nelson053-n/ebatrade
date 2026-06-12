@@ -945,10 +945,16 @@ async def st4_set_config(payload: dict):
     s.deviation_pct = _num("deviation_pct", 0.0, 0.2, s.deviation_pct)
     s.stop_sigma = _num("stop_sigma", 0.0, 10.0, s.stop_sigma)
     s.max_bars_in_trade = int(_num("max_bars_in_trade", 0, 100000, s.max_bars_in_trade))
+    s.deviation_sigma = _num("deviation_sigma", 0.0, 10.0, s.deviation_sigma)
+    s.pending_ttl_bars = int(_num("pending_ttl_bars", 1, 100, s.pending_ttl_bars))
     if "deviation_mode" in payload:
-        if payload["deviation_mode"] not in ("AbsOfMean", "LiteralPct"):
-            raise HTTPException(400, "deviation_mode: AbsOfMean | LiteralPct")
+        if payload["deviation_mode"] not in ("AbsOfMean", "LiteralPct", "Sigma"):
+            raise HTTPException(400, "deviation_mode: AbsOfMean | LiteralPct | Sigma")
         s.deviation_mode = payload["deviation_mode"]
+    if "entry_trigger" in payload:
+        if payload["entry_trigger"] not in ("Breakout", "ReEntry"):
+            raise HTTPException(400, "entry_trigger: Breakout | ReEntry")
+        s.entry_trigger = payload["entry_trigger"]
     if "freeze_sma_on_exit" in payload:
         s.freeze_sma_on_exit = bool(payload["freeze_sma_on_exit"])
     if "interval_min" in payload:
