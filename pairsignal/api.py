@@ -1029,6 +1029,7 @@ async def st4_start():
 def st4_stop():
     ST4.state["live"] = False
     ST4.state["paused_by_user"] = True   # намеренная остановка — автостарт не возобновляет
+    ST4.save_session()   # зафиксировать флаги: иначе крэш до следующего save возобновит live
     return {"ok": True}
 
 
@@ -1047,6 +1048,7 @@ async def st4_player_start(limit: int = 1500):
         ST4.player_df = feed.generate_synthetic(n=limit, interval_min=iv)
         ST4.player_idx = 0
     ST4.state["player"] = True
+    ST4.save_session()   # зафиксировать data_source=synthetic (автостарт не должен поднять live)
     asyncio.create_task(ST4.run_player())
     return {"ok": True, "resumed": resuming}
 
