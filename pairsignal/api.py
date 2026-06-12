@@ -351,6 +351,8 @@ async def lifespan(app: FastAPI):
     ST4.load_session()
     from .st4 import tbank_sandbox as _sb
     _sb.load_token()                  # подтянуть сохранённый токен T-Bank (переживает рестарт)
+    if ST4.state.pop("resume_live", False):
+        asyncio.create_task(_st4_autoresume())   # автостарт: live шёл до рестарта
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())   # авто-бэктест раз в ~2.5 дня
     yield
     _auto_bt_task.cancel()
@@ -985,6 +987,23 @@ async def st4_set_config(payload: dict):
             "was_player": was_player, "restarted": was_live or was_player}
 
 
+async def _st4_autoresume():
+    """Автостарт live после рестарта сервера: ПРОДОЛЖАЕМ сессию без сброса журнала.
+
+    Вызывается из lifespan, когда сохранённая сессия была в live и не остановлена
+    оператором. Paper: восстановленный движок продолжает (BB прогревается в run_live
+    по last_live_ts). Sandbox: исполнителю нужен счёт — полный старт через reset_engine.
+    """
+    ST4.state["player"] = False
+    ST4.state["data_source"] = "live"
+    ST4.state["live"] = True
+    ST4.log_event("info", "автовозобновление live после рестарта сервера")
+    if ST4.cfg.connector.mode == "tbank_sandbox":
+        await asyncio.to_thread(ST4.reset_engine, True)
+    if ST4.state["live"]:
+        await ST4.run_live()
+
+
 @app.post("/st4/control/start")
 async def st4_start():
     """Запустить live. Тяжёлый старт (резолв серий + sandbox-счёт + pay_in) — в фоне,
@@ -994,6 +1013,7 @@ async def st4_start():
     ST4.state["player"] = False
     ST4.state["data_source"] = "live"
     ST4.state["live"] = True
+    ST4.state["paused_by_user"] = False  # старт снимает намеренную остановку
     ST4.log_event("info", "запуск live… (резолв инструментов и счёта в фоне)")
 
     async def _boot():
@@ -1008,6 +1028,7 @@ async def st4_start():
 @app.post("/st4/control/stop")
 def st4_stop():
     ST4.state["live"] = False
+    ST4.state["paused_by_user"] = True   # намеренная остановка — автостарт не возобновляет
     return {"ok": True}
 
 
@@ -1145,15 +1166,16 @@ def st4_trades():
 async def st4_backtest(days: int = 90, stop_sigma: float | None = None):
     """Бэктест на реальной истории MOEX ISS за period (honest: maxDD по equity)."""
     def _run() -> dict:
+        # спецификации ног резолвим ЛОКАЛЬНО: бэктест не должен трогать живую сессию
+        # (resolve_real_legs перезаписывает ST4.spec_ord/spec_pref)
         try:
-            ST4.resolve_real_legs()
+            spec_ord, spec_pref = feed.resolve_legs(ST4.cfg)
         except Exception as e:  # noqa: BLE001
             return {"error": f"не удалось определить серии: {e}"}
         since = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         since = since.fromtimestamp(since.timestamp() - days * 86400, tz=_tz.utc)
         try:
-            df = feed.read_ohlcv_moex_range(ST4.cfg, since, ST4.spec_ord.code,
-                                            ST4.spec_pref.code)
+            df = feed.read_ohlcv_moex_range(ST4.cfg, since, spec_ord.code, spec_pref.code)
         except Exception as e:  # noqa: BLE001
             return {"error": f"не удалось получить историю: {e}"}
         if len(df) < ST4.cfg.strategy.sma_period + 20:
@@ -1162,9 +1184,9 @@ async def st4_backtest(days: int = 90, stop_sigma: float | None = None):
         bt_cfg = _Cfg(**ST4.cfg.model_dump())
         if stop_sigma is not None:
             bt_cfg.strategy.stop_sigma = stop_sigma
-        res = run_backtest(df, bt_cfg, ST4.spec_ord, ST4.spec_pref)
+        res = run_backtest(df, bt_cfg, spec_ord, spec_pref)
         res["bands"] = band_frame_for_chart(df, bt_cfg)[-400:]
-        res["legs"] = {"ord": ST4.spec_ord.code, "pref": ST4.spec_pref.code}
+        res["legs"] = {"ord": spec_ord.code, "pref": spec_pref.code}
         # запись в историю прогонов ISS (отдельно от T-Bank)
         from .st4.service import bt_history_append
         entry = {
@@ -1186,10 +1208,11 @@ def _run_backtest_tbank(stop_sigma: float | None) -> dict:
     from .st4 import tbank_sandbox as _sb
     if not _sb.has_token():
         return {"error": "нужен токен T-Bank (вставьте в блоке «Коннектор»)"}
+    # спецификации ног — локально, не трогая ST4.spec_ord/spec_pref живой сессии
     try:
-        ST4.resolve_real_legs()
-        it_o = _sb.find_future(ST4.spec_ord.code)
-        it_p = _sb.find_future(ST4.spec_pref.code)
+        spec_ord, spec_pref = feed.resolve_legs(ST4.cfg)
+        it_o = _sb.find_future(spec_ord.code)
+        it_p = _sb.find_future(spec_pref.code)
     except Exception as e:  # noqa: BLE001
         return {"error": f"T-Bank: {e}"}
     try:
@@ -1203,8 +1226,8 @@ def _run_backtest_tbank(stop_sigma: float | None) -> dict:
     bt_cfg = _Cfg(**ST4.cfg.model_dump())
     if stop_sigma is not None:
         bt_cfg.strategy.stop_sigma = stop_sigma
-    res = run_backtest(df, bt_cfg, ST4.spec_ord, ST4.spec_pref)
-    res["legs"] = {"ord": ST4.spec_ord.code, "pref": ST4.spec_pref.code}
+    res = run_backtest(df, bt_cfg, spec_ord, spec_pref)
+    res["legs"] = {"ord": spec_ord.code, "pref": spec_pref.code}
     res["source"] = "T-Bank real-time"
     entry = {
         "date": _dt.now(_MSK).strftime("%Y-%m-%d %H:%M"),

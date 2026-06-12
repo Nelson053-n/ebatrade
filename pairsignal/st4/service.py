@@ -194,6 +194,12 @@ class St4Session:
                 "spec_ord": asdict(self.spec_ord), "spec_pref": asdict(self.spec_pref),
                 "day_pnl_rub": self.engine.risk.day_pnl_rub,
                 "day_key": self.engine.risk._day,
+                # для автостарта после рестарта сервера: шёл ли live и не остановлен ли
+                # он оператором; last_live_ts — чтобы не переторговывать старые бары
+                "live": self.state["live"],
+                "data_source": self.state["data_source"],
+                "paused_by_user": self.state["paused_by_user"],
+                "last_live_ts": self.last_live_ts,
             }
             _SESSION_FILE.write_text(json.dumps(_clean(data)))
         except Exception:  # noqa: BLE001
@@ -240,6 +246,13 @@ class St4Session:
             self.engine.trades = [self._trade_from_json(t) for t in data.get("trades", [])]
             self.history = data.get("history", [])
             self.state["session_started"] = data.get("session_started", time.time())
+            self.last_live_ts = int(data.get("last_live_ts") or 0)
+            self.state["paused_by_user"] = bool(data.get("paused_by_user", False))
+            # автостарт: live шёл на момент последнего сохранения и не был остановлен
+            # оператором → возобновить после рестарта (исполняет lifespan в api.py)
+            self.state["resume_live"] = (bool(data.get("live"))
+                                         and data.get("data_source") == "live"
+                                         and not self.state["paused_by_user"])
             return True
         except Exception:  # noqa: BLE001
             return False
@@ -288,6 +301,12 @@ class St4Session:
                         feed.read_ohlcv_moex, self.cfg, self.warmup_limit(),
                         self.spec_ord.code, self.spec_pref.code)
                     df = df.iloc[:-1]  # ISS: без формирующегося бара
+                # возобновление сессии после рестарта: бары ≤ last_live_ts пропускаются,
+                # а буфер BB пуст — прогреваем его спредами старых баров (без сделок)
+                if self.last_live_ts and not self.engine.bb._buf:
+                    old = df[df.index <= self.last_live_ts]
+                    if len(old):
+                        self.engine.warmup((old["price_b"] - old["price_a"]).tolist())
                 n = len(df)
                 slow_from = n - 60 if not replayed else 0
                 self.engine.arm(not (sandbox and not replayed))  # на replay-проходе входы закрыты
