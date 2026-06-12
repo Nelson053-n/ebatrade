@@ -186,12 +186,12 @@ def test_short_spread_profits_when_spread_falls():
     cfg.strategy.deviation_pct = 0.0
     so, sp = _specs()
     eng = TradingEngine(cfg, so, sp)
-    # прогрев: спред колеблется ~100 ± небольшой шум (нужна σ>0, иначе полосы вырождены)
+    # прогрев: спред 100 ± 5 попеременно — σ=5, полосы 100±10 ни разу не пробиваются
+    # (случайный шум мог сам пересечь 2σ и дать ранний вход вместо задуманного пробоя)
     base = 32000.0
     ts = 0
-    rng = np.random.default_rng(0)
-    for _ in range(40):
-        noise = float(rng.normal(0, 5))
+    for i in range(40):
+        noise = 5.0 if i % 2 == 0 else -5.0
         eng.on_candles(ts, base, base + 100 + noise)
         ts += 600000
     # пробой вверх существенно за полосу: спред 250 → SELL (шорт спреда)
@@ -560,3 +560,118 @@ def test_engine_uses_tinkoff_when_sandbox(monkeypatch):
     sp.code = "SPM6"
     eng = TradingEngine(cfg, so, sp)
     assert type(eng.executor).__name__ == "TinkoffSandboxExecutor"
+
+
+# ============================ §6.4 экспирация / роллировер ============================
+
+def _engine_with_expiry(expiry: str) -> TradingEngine:
+    cfg = St4Config()
+    cfg.strategy.sma_period = 30
+    cfg.strategy.deviation_pct = 0.0
+    so, sp = _specs()
+    so.expiry = sp.expiry = expiry
+    return TradingEngine(cfg, so, sp)
+
+
+def _warm_alternating(eng: TradingEngine, n: int = 40, base: float = 32000.0,
+                      start_ts: int = 0) -> int:
+    ts = start_ts
+    for i in range(n):
+        noise = 5.0 if i % 2 == 0 else -5.0
+        eng.on_candles(ts, base, base + 100 + noise)
+        ts += 600000
+    return ts
+
+
+def test_expiry_gate_blocks_entry():
+    """За rollover_no_new_entry_days_before дней до экспирации вход запрещён."""
+    from datetime import datetime, timedelta, timezone
+    soon = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d")
+    eng = _engine_with_expiry(soon)
+    # бары «сейчас»: до экспирации 2 дн < 5 (no_new_entry)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    ts = _warm_alternating(eng, start_ts=now_ms)
+    res = eng.on_candles(ts, 32000.0, 32000.0 + 250)     # пробой → сигнал был бы
+    assert eng.state == BotState.FLAT                     # вход не открыт
+    assert any("экспирации" in e.message for e in res.events)
+
+
+def test_expiry_forces_position_close():
+    """Открытая позиция закрывается, когда до экспирации < rollover_days_before_expiry."""
+    from datetime import datetime, timedelta, timezone
+    far = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
+    eng = _engine_with_expiry(far)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    ts = _warm_alternating(eng, start_ts=now_ms)
+    eng.on_candles(ts, 32000.0, 32000.0 + 250)
+    assert eng.state == BotState.SHORT_SPREAD
+    # «прошло 28 дней»: до экспирации 2 дн < 3 (rollover_days_before_expiry)
+    ts28 = ts + 28 * 24 * 3600 * 1000
+    res = eng.on_candles(ts28, 32000.0, 32000.0 + 240)
+    assert eng.state == BotState.FLAT
+    assert eng.trades and eng.trades[-1].reason == "rollover"
+    assert res.trade is not None
+
+
+# ============================ гейт Sigma / вход ReEntry ============================
+
+def test_deviation_gate_sigma_mode():
+    cfg = St4Config().strategy
+    cfg.deviation_mode = "Sigma"
+    cfg.deviation_sigma = 2.0
+    # σ=10 → порог 20
+    assert deviation_gate(Signal.SELL, 121, 100, cfg, sigma=10)
+    assert not deviation_gate(Signal.SELL, 119, 100, cfg, sigma=10)
+    assert deviation_gate(Signal.BUY, 79, 100, cfg, sigma=10)
+    assert not deviation_gate(Signal.BUY, 81, 100, cfg, sigma=10)
+
+
+def test_entry_trigger_reentry():
+    cfg = St4Config().strategy
+    cfg.entry_trigger = "ReEntry"
+    cfg.deviation_pct = 0.0
+    # был снаружи (125 >= upper 120), вернулся внутрь (115 < 120) → SELL
+    assert entry_signal(_band(0, 125, 100, 10), _band(1, 115, 100, 10), cfg) == Signal.SELL
+    # пробой наружу в ReEntry-режиме сигнала НЕ даёт
+    assert entry_signal(_band(0, 105, 100, 10), _band(1, 125, 100, 10), cfg) == Signal.NONE
+    # снизу: был под lower 80, вернулся внутрь → BUY
+    assert entry_signal(_band(0, 75, 100, 10), _band(1, 85, 100, 10), cfg) == Signal.BUY
+
+
+# ============================ §11 дневной лимит с unrealized ============================
+
+def test_day_loss_kill_switch_with_unrealized():
+    """Лимит срабатывает от нереализованного убытка: позиция закрывается, движок HALTED."""
+    cfg = St4Config()
+    cfg.strategy.sma_period = 30
+    cfg.strategy.deviation_pct = 0.0
+    cfg.risk.max_daily_loss_rub = 100.0    # крошечный лимит — пробьёт ход спреда
+    so, sp = _specs()
+    eng = TradingEngine(cfg, so, sp)
+    ts = _warm_alternating(eng)
+    eng.on_candles(ts, 32000.0, 32000.0 + 250)   # SELL: шорт спреда
+    assert eng.state == BotState.SHORT_SPREAD
+    ts += 600000
+    # спред улетает ещё выше → unrealized < −100₽
+    eng.on_candles(ts, 32000.0, 32000.0 + 500)
+    assert eng.state == BotState.HALTED
+    assert eng.risk.halted
+    assert eng.trades and eng.trades[-1].reason == "stop"
+
+
+# ============================ персист открытой позиции ============================
+
+def test_position_json_roundtrip():
+    from dataclasses import asdict
+    import json as _json
+    from pairsignal.st4.service import St4Session
+    pos = Position(
+        state=BotState.LONG_SPREAD,
+        leg_ord=LegPosition("SRM6", Role.ORDINARY, "buy", 2, 31000.0),
+        leg_pref=LegPosition("SPM6", Role.PREFERRED, "sell", 2, 31100.0),
+        entry_ts=123, entry_spread=100.0, entry_beta=1.0,
+        sma_at_entry=90.0, entry_fee_rub=8.0,
+    )
+    d = _json.loads(_json.dumps(asdict(pos)))    # enum'ы — str-подклассы → строки
+    back = St4Session._position_from_json(d)
+    assert back == pos

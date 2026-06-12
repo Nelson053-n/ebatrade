@@ -86,7 +86,9 @@ class TinkoffSandboxExecutor:
         if status != _FILL_OK or avg <= 0:
             return None
         slip = (avg - ref) / spec.tick_size * (1 if side == "buy" else -1)
-        return Fill(code=spec.code, role=spec.role, side=side, lots=lots,
+        # lots в Fill — ФАКТИЧЕСКИ исполненные: при частичном филле размер позиции
+        # должен совпадать с брокером (рассинхрон ног ловит execute_pair)
+        return Fill(code=spec.code, role=spec.role, side=side, lots=executed,
                     avg_price=avg, reference_price=ref, slippage_ticks=slip)
 
     def _retry_leg(self, role: Role, side: str, lots: int, ref: float) -> Fill | None:
@@ -124,6 +126,15 @@ class TinkoffSandboxExecutor:
                 raise UnwindError("вторая нога sandbox не залилась, unwind первой не удался")
             return PairFillResult(ok=False, unwound=True,
                                   reason="вторая нога (sandbox) не исполнилась — первая закрыта (unwind)")
+
+        if f1.lots != f2.lots:
+            # частичный филл одной из ног — рассинхрон размеров недопустим: закрываем обе
+            ok1 = self._unwind(f1)
+            ok2 = self._unwind(f2)
+            if not (ok1 and ok2):
+                raise UnwindError("частичный филл ноги, аварийное закрытие не удалось")
+            return PairFillResult(ok=False, unwound=True,
+                                  reason=f"частичный филл ({f1.lots}≠{f2.lots} лотов) — обе ноги закрыты")
 
         if first_pref:
             return PairFillResult(ok=True, fill_pref=f1, fill_ord=f2)

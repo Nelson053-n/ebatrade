@@ -157,6 +157,33 @@ class St4Session:
         self.state["session_started"] = time.time()
         self.save_session()
 
+    def rollover_legs(self) -> bool:
+        """Авто-роллировер (§6.4): пере-резолв серий, пересборка движка на новые ноги
+        с ПЕРЕНОСОМ журнала/баланса/дневного риска — сессия продолжается.
+
+        Вызывать только без открытой позиции (движок сам закрывает её гейтом экспирации).
+        Сетевые вызовы (ISS, sandbox-счёт) — гонять через to_thread. True — серии сменились.
+        BB нового движка пуст: run_live прогреет его барами новой серии ≤ last_live_ts.
+        """
+        old = (self.spec_ord.code, self.spec_pref.code)
+        self.resolve_real_legs()
+        if (self.spec_ord.code, self.spec_pref.code) == old:
+            return False
+        prev = self.engine
+        cfg = self.cfg
+        if not self.state.get("sandbox_active"):
+            cfg = self.cfg.model_copy(deep=True)
+            cfg.connector.mode = "paper"
+        eng = TradingEngine(cfg, self.spec_ord, self.spec_pref)
+        eng.balance_rub = prev.balance_rub
+        eng.trades = prev.trades
+        eng.risk.day_pnl_rub = prev.risk.day_pnl_rub
+        eng.risk._day = prev.risk._day
+        self.engine = eng
+        self.history = []      # спред новых серий — старые полосы неприменимы
+        self.save_session()
+        return True
+
     def log_event(self, kind: str, message: str) -> None:
         """Записать действие в кольцевой журнал бота (+ last_event для совместимости)."""
         self.events.append({"ts": time.time(), "kind": kind, "message": message})
@@ -194,6 +221,12 @@ class St4Session:
                 "spec_ord": asdict(self.spec_ord), "spec_pref": asdict(self.spec_pref),
                 "day_pnl_rub": self.engine.risk.day_pnl_rub,
                 "day_key": self.engine.risk._day,
+                # открытая позиция и HALTED переживают рестарт (paper); enum'ы — str-подклассы,
+                # json.dumps сериализует их как строки
+                "position": asdict(self.engine.position) if self.engine.position else None,
+                "bars_held": self.engine._bars_held,
+                "halted": self.engine.risk.halted,
+                "halt_reason": self.engine.risk.halt_reason,
                 # для автостарта после рестарта сервера: шёл ли live и не остановлен ли
                 # он оператором; last_live_ts — чтобы не переторговывать старые бары
                 "live": self.state["live"],
@@ -244,6 +277,15 @@ class St4Session:
             self.engine.risk.day_pnl_rub = data.get("day_pnl_rub", 0.0)
             self.engine.risk._day = data.get("day_key", "")
             self.engine.trades = [self._trade_from_json(t) for t in data.get("trades", [])]
+            from .models import BotState
+            pos = data.get("position")
+            if pos:
+                self.engine.position = self._position_from_json(pos)
+                self.engine.state = self.engine.position.state
+                self.engine._bars_held = int(data.get("bars_held", 0))
+            if data.get("halted"):
+                self.engine.risk.halt(data.get("halt_reason") or "восстановлено из сессии")
+                self.engine.state = BotState.HALTED
             self.history = data.get("history", [])
             self.state["session_started"] = data.get("session_started", time.time())
             self.last_live_ts = int(data.get("last_live_ts") or 0)
@@ -263,6 +305,20 @@ class St4Session:
         d = dict(d)
         d["state"] = BotState(d["state"])
         return Trade(**d)
+
+    @staticmethod
+    def _position_from_json(d: dict):
+        from .models import BotState, LegPosition, Position, Role
+        legs = {}
+        for k in ("leg_ord", "leg_pref"):
+            ld = dict(d[k])
+            ld["role"] = Role(ld["role"])
+            legs[k] = LegPosition(**ld)
+        return Position(state=BotState(d["state"]), leg_ord=legs["leg_ord"],
+                        leg_pref=legs["leg_pref"], entry_ts=d["entry_ts"],
+                        entry_spread=d["entry_spread"], entry_beta=d["entry_beta"],
+                        sma_at_entry=d["sma_at_entry"],
+                        entry_fee_rub=d.get("entry_fee_rub", 0.0))
 
     # ---------- фоновые задачи ----------
     async def run_live(self) -> None:
@@ -291,6 +347,18 @@ class St4Session:
                        f"{self.spec_ord.code}/{self.spec_pref.code}, прогрев BB({self.cfg.strategy.sma_period})…")
         while self.state["live"]:
             try:
+                # авто-роллировер: серия у экспирации, позиции нет → следующая серия
+                d2e = self.engine.days_to_expiry(int(time.time() * 1000))
+                if (d2e is not None and self.engine.position is None
+                        and d2e < self.cfg.instruments.rollover_days_before_expiry
+                        and await asyncio.to_thread(self.rollover_legs)):
+                    self.log_event("info", f"роллировер: торгуем {self.spec_ord.code}/"
+                                   f"{self.spec_pref.code} (журнал и баланс сохранены)")
+                    if sandbox and hasattr(self.engine.executor, "leg_uids"):
+                        try:
+                            tbank_uids = self.engine.executor.leg_uids()
+                        except Exception:  # noqa: BLE001
+                            tbank_uids = None
                 if tbank_uids:
                     df = await asyncio.to_thread(
                         feed.read_ohlcv_tbank, self.cfg, self.warmup_limit(),
@@ -319,7 +387,16 @@ class St4Session:
                         if ts <= self.last_live_ts:
                             continue
                         if self.engine._pending is not None:   # ждём решения оператора
-                            break
+                            # TTL: неподтверждённая рекомендация протухает через N баров —
+                            # approve по устаревшей цене хуже пропущенного входа
+                            ttl_ms = (self.cfg.strategy.pending_ttl_bars
+                                      * self.cfg.strategy.candle_interval_minutes * 60_000)
+                            if ts - self.engine._pending[1].ts > ttl_ms:
+                                self.engine.reject()
+                                self.log_event("warn", "рекомендация не подтверждена за "
+                                               f"{self.cfg.strategy.pending_ttl_bars} баров — отклонена (TTL)")
+                            else:
+                                break
                         res = self.engine.on_candles(ts, float(row["price_a"]),
                                                      float(row["price_b"]))
                         self.last_live_ts = ts

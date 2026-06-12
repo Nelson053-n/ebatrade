@@ -999,7 +999,19 @@ async def _st4_autoresume():
     ST4.state["live"] = True
     ST4.log_event("info", "автовозобновление live после рестарта сервера")
     if ST4.cfg.connector.mode == "tbank_sandbox":
+        prev = ST4.engine                       # восстановленная сессия (журнал/баланс)
+        started = ST4.state["session_started"]
         await asyncio.to_thread(ST4.reset_engine, True)
+        # продолжение форвард-теста: reset нужен только ради sandbox-счёта — журнал,
+        # баланс и день риска переносим. Позицию не переносим: reconciliation в
+        # reset_engine уже привела счёт к FLAT.
+        eng = ST4.engine
+        eng.trades = prev.trades
+        eng.balance_rub = prev.balance_rub
+        eng.risk.day_pnl_rub = prev.risk.day_pnl_rub
+        eng.risk._day = prev.risk._day
+        ST4.state["session_started"] = started
+        ST4.save_session()
     if ST4.state["live"]:
         await ST4.run_live()
 
@@ -1275,6 +1287,55 @@ def st4_backtest_history(source: str = "tbank"):
     if source not in ("tbank", "moex"):
         raise HTTPException(400, "source: tbank | moex")
     return {"history": bt_history_load(source)}
+
+
+# --- скан пар обычка/преф FORTS (отдельная страница-отчёт) ---
+ST4_REPORT_HTML = Path(__file__).resolve().parent.parent / "st4_report.html"
+_ST4_SCAN = {"running": False, "error": None}
+
+
+@app.get("/st4/report")
+def st4_report_page():
+    """Страница отчёта скана пар (ссылка с вкладки st4)."""
+    if not ST4_REPORT_HTML.exists():
+        raise HTTPException(404, "st4_report.html не найден")
+    return FileResponse(ST4_REPORT_HTML)
+
+
+@app.get("/st4/scan/report")
+def st4_scan_report():
+    """Последний результат скана пар + статус текущего прогона."""
+    from .st4.scan_pairs import OUT_JSON
+    rep = None
+    if OUT_JSON.exists():
+        try:
+            rep = json.loads(OUT_JSON.read_text())
+        except Exception:  # noqa: BLE001
+            rep = None
+    return {"report": rep, "running": _ST4_SCAN["running"], "error": _ST4_SCAN["error"]}
+
+
+@app.post("/st4/scan/run")
+async def st4_scan_run(days: int = 60, stop_sigma: float | None = None):
+    """Запустить скан в фоне (ISS медленный — минуты). Параметры стратегии — текущие st4."""
+    if _ST4_SCAN["running"]:
+        return {"ok": True, "already": True}
+    _ST4_SCAN["running"] = True
+    _ST4_SCAN["error"] = None
+
+    async def _job():
+        try:
+            from .st4.scan_pairs import run_scan
+            rep = await asyncio.to_thread(run_scan, days, stop_sigma, None, ST4.cfg)
+            ok = sum(1 for r in rep["rows"] if "error" not in r)
+            ST4.log_event("info", f"скан пар FORTS завершён: {ok}/{len(rep['rows'])} пар, {days}д")
+        except Exception as e:  # noqa: BLE001
+            _ST4_SCAN["error"] = str(e)
+        finally:
+            _ST4_SCAN["running"] = False
+
+    asyncio.create_task(_job())
+    return {"ok": True, "started": True}
 
 
 @app.get("/st4/margin")

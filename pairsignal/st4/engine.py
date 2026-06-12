@@ -10,6 +10,7 @@ OrderExecutor → ведёт позицию/журнал/P&L → RiskManager. Re
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from .config import St4Config
@@ -105,6 +106,19 @@ class TradingEngine:
                 out.append(res)
         return out
 
+    def days_to_expiry(self, ts_ms: int) -> Optional[int]:
+        """Дней до ближайшей экспирации ног на момент ts (None — экспирация неизвестна,
+        напр. синтетика). Используется гейтами роллировера (§6.4)."""
+        exps = [s.expiry for s in (self.spec_ord, self.spec_pref) if s.expiry]
+        if not exps:
+            return None
+        try:
+            exp = min(date.fromisoformat(e) for e in exps)
+        except ValueError:
+            return None
+        cur = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date()
+        return (exp - cur).days
+
     # ---------- основной шаг FSM ----------
     def step(self, bar: SpreadBar) -> StepResult:
         self._last_spread_bar = bar
@@ -118,6 +132,30 @@ class TradingEngine:
 
         if self.position is not None:
             self._bars_held += 1
+
+        # ---- дневной kill-switch (§11): реализованный + нереализованный убыток ----
+        if self.position is not None and self.risk.day_loss_breached(
+                bar.ts, self.unrealized_rub()):
+            trade = self._close_position(bar, "stop")
+            self.risk.halt(f"дневной лимит убытка {self.cfg.risk.max_daily_loss_rub:.0f}₽")
+            self.state = BotState.HALTED
+            events.append(EngineEvent(bar.ts, "halt",
+                          f"дневной лимит: позиция закрыта (net {trade.net_pnl_rub:+.0f}₽), HALTED", {}))
+            self._prev = band
+            return StepResult(state=self.state, band=band, signal=Signal.EXIT,
+                              trade=trade, events=events)
+
+        # ---- роллировер (§6.4): позиция не доживает до экспирации серии ----
+        if self.position is not None:
+            d2e = self.days_to_expiry(bar.ts)
+            if d2e is not None and d2e < self.cfg.instruments.rollover_days_before_expiry:
+                trade = self._close_position(bar, "rollover")
+                events.append(EngineEvent(bar.ts, "exit",
+                              f"роллировер: до экспирации {d2e} дн — закрытие "
+                              f"(net {trade.net_pnl_rub:+.0f}₽)", {}))
+                self._prev = band
+                return StepResult(state=self.state, band=band, signal=Signal.EXIT,
+                                  trade=trade, events=events)
 
         # ---- управление открытой позицией (выход — авто) ----
         if self.position is not None and self._prev is not None and band.is_ready:
@@ -148,10 +186,16 @@ class TradingEngine:
         if self.position is None and self._armed and self._prev is not None and band.is_ready:
             sig = entry_signal(self._prev, band, self.cfg.strategy)
             if sig != Signal.NONE:
+                # гейт экспирации (§6.4): новые входы запрещены в окне роллировера
+                d2e = self.days_to_expiry(bar.ts)
+                no_entry = self.cfg.instruments.rollover_no_new_entry_days_before
                 # сессионный фильтр (§9.7): исполнение происходит на CLOSE бара
                 # (bar.ts — open-время), поэтому окно проверяем по моменту исполнения
                 exec_ts = bar.ts + self.cfg.strategy.candle_interval_minutes * 60_000
-                if in_clearing_window(exec_ts, self.cfg.session):
+                if d2e is not None and d2e < no_entry:
+                    events.append(EngineEvent(bar.ts, "warn",
+                                  f"сигнал пропущен: до экспирации {d2e} дн (< {no_entry})", {}))
+                elif in_clearing_window(exec_ts, self.cfg.session):
                     events.append(EngineEvent(bar.ts, "warn",
                                   "сигнал в клиринговом окне — пропуск", {}))
                 else:
@@ -210,10 +254,13 @@ class TradingEngine:
         # Тогда P&L позиции = ±(spread_exit − spread_entry), знак согласован с направлением.
         buy_ord = (sig == Signal.SELL)    # SBRF
         buy_pref = (sig == Signal.BUY)    # SBPR
-        # книга: в paper лучший бид/аск = close ± половина тика (узкий спред стакана)
+        # книга: в paper лучший бид/аск = close ± полуширина стакана (конфигурируемая —
+        # реальный стакан SBPR шире одного тика, см. paper_book_halfspread_ticks)
         ref_ord, ref_pref = bar.close_ord, bar.close_pref
-        book_ord = (ref_ord - self.spec_ord.tick_size / 2, ref_ord + self.spec_ord.tick_size / 2)
-        book_pref = (ref_pref - self.spec_pref.tick_size / 2, ref_pref + self.spec_pref.tick_size / 2)
+        hs_o = self.cfg.execution.paper_book_halfspread_ticks * self.spec_ord.tick_size
+        hs_p = self.cfg.execution.paper_book_halfspread_ticks * self.spec_pref.tick_size
+        book_ord = (ref_ord - hs_o, ref_ord + hs_o)
+        book_pref = (ref_pref - hs_p, ref_pref + hs_p)
 
         try:
             r = self.executor.execute_pair(buy_ord, buy_pref, lots, book_ord, book_pref,
@@ -232,15 +279,16 @@ class TradingEngine:
             return StepResult(state=self.state, band=band, signal=sig, events=events)
 
         self.risk.on_success()
-        fee = pair_fee_rub(lots, self.cfg.paper)
+        filled = r.fill_ord.lots   # фактически исполненные лоты (равенство ног — гарантия исполнителя)
+        fee = pair_fee_rub(filled, self.cfg.paper)
         self.balance_rub -= fee
         new_state = BotState.SHORT_SPREAD if sig == Signal.SELL else BotState.LONG_SPREAD
         slip = abs(r.fill_ord.slippage_ticks) + abs(r.fill_pref.slippage_ticks)
         self.position = Position(
             state=new_state,
-            leg_ord=LegPosition(self.spec_ord.code, Role.ORDINARY, r.fill_ord.side, lots,
+            leg_ord=LegPosition(self.spec_ord.code, Role.ORDINARY, r.fill_ord.side, filled,
                                 r.fill_ord.avg_price),
-            leg_pref=LegPosition(self.spec_pref.code, Role.PREFERRED, r.fill_pref.side, lots,
+            leg_pref=LegPosition(self.spec_pref.code, Role.PREFERRED, r.fill_pref.side, filled,
                                  r.fill_pref.avg_price),
             entry_ts=bar.ts, entry_spread=bar.spread, entry_beta=beta,
             sma_at_entry=band.sma, entry_fee_rub=fee,

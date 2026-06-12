@@ -32,11 +32,21 @@ class StrategyConfig(BaseModel):
     std_mode: Literal["Population", "Sample"] = "Population"   # /N или /(N−1)
     # гейт отклонения от средней. AbsOfMean знаконезависим (корректно при любом знаке
     # спреда), LiteralPct — буквально из исходного ТЗ (ломается при SMA<0).
-    deviation_mode: Literal["AbsOfMean", "LiteralPct"] = "AbsOfMean"
-    deviation_pct: float = 0.02           # 2%
+    # Sigma — порог в единицах σ спреда (рекомендуется: %|SMA| у спреда, близкого к 0,
+    # вырождается — σ масштабируется с волатильностью всегда).
+    deviation_mode: Literal["AbsOfMean", "LiteralPct", "Sigma"] = "AbsOfMean"
+    deviation_pct: float = 0.02           # 2% (для AbsOfMean/LiteralPct)
+    deviation_sigma: float = 2.2          # для Sigma: |spread−SMA| ≥ deviation_sigma·σ
+    # триггер входа: Breakout — первый пробой полосы наружу (ловит нож при структурном
+    # сдвиге); ReEntry — вход по ВОЗВРАТУ в канал (спред был снаружи и вернулся внутрь)
+    entry_trigger: Literal["Breakout", "ReEntry"] = "Breakout"
     # выход по пересечению средней: живая SMA (дрейфует) или зафиксированная на входе
     freeze_sma_on_exit: bool = False
     max_bars_in_trade: int = 0            # тайм-стоп (0 = выключен)
+    # ручной режим: через сколько закрытых баров неподтверждённая рекомендация
+    # протухает (авто-reject) — иначе pending блокирует подачу баров бесконечно,
+    # а approve исполнил бы по давно устаревшей цене
+    pending_ttl_bars: int = 3
     # ЗАЩИТНЫЙ СТОП (расширение сверх §9.4, по умолчанию ВЫКЛЮЧЕН — буква ТЗ требует
     # выход только по средней). При stop_sigma>0: если спред ушёл против позиции дальше
     # stop_sigma·σ от средней — закрываем по стопу. Защита от разрыва коинтеграции/тренда,
@@ -53,6 +63,9 @@ class ExecutionConfig(BaseModel):
     first_leg_to_fill: Literal["Preferred", "Ordinary"] = "Preferred"  # менее ликвидную первой
     deviation_protection_ticks: int = 5   # макс. отклонение цены → отмена входа
     quantity_lots: int = 1                # лотов на ногу (для β=1)
+    # полуширина paper-стакана в тиках: книга = close ± halfspread·tick. Реальный стакан
+    # SBPR заметно шире одного тика — занижение этого параметра приукрашивает paper-P&L
+    paper_book_halfspread_ticks: float = 1.0
     # paper-модель неисполнения: вероятность, что нога не зальётся за max_retries
     # (для тестов атомарности/unwind; 0 = всегда заливается — детерминированный paper)
     paper_fill_fail_prob: float = 0.0

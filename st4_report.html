@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>st4 · скан пар обычка/преф FORTS</title>
+<style>
+:root{
+  --bg:#080b0c; --panel:#0e1416; --panel-2:#111a1c; --line:#1d2a2d;
+  --ink:#cfe3e0; --ink-dim:#6f8884; --ink-faint:#3f5350;
+  --signal:#2ee6a6; --warn:#ffb648; --loss:#ff5d6c;
+  --mono:'IBM Plex Mono',monospace; --disp:'Chakra Petch',sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:var(--bg);color:var(--ink);font:13px/1.5 var(--mono)}
+.wrap{max-width:1100px;margin:0 auto}
+h1{font-family:var(--disp);font-size:18px;margin:0 0 4px;letter-spacing:.4px}
+h1 em{font-style:normal;font-size:12px;color:var(--ink-dim);font-weight:400}
+.back{color:var(--signal);text-decoration:none;font-size:12px}
+.back:hover{text-decoration:underline}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:14px}
+.controls{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.fld{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--ink-dim)}
+.fld input{background:var(--bg);border:1px solid var(--line);border-radius:7px;color:var(--ink);font:13px var(--mono);padding:6px 8px;width:80px}
+button{background:rgba(46,230,166,.12);border:1px solid var(--signal);border-radius:8px;color:var(--signal);font:600 12px var(--disp);padding:8px 16px;cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+#status{font-size:12px;color:var(--ink-dim)}
+#status.err{color:var(--loss)}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+th{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink-faint);text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+.pos{color:var(--signal)} .neg{color:var(--loss)} .dim{color:var(--ink-dim)} .warn{color:var(--warn)}
+.meta{font-size:11px;color:var(--ink-faint);margin-top:8px;line-height:1.7}
+.errrow{color:var(--loss);font-size:12px}
+.spin{display:inline-block;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← к панели</a>
+  <h1 style="margin-top:8px">Скан пар обычка/преф · FORTS <em>бэктест движка st4 по каждой паре</em></h1>
+  <div style="font-size:12px;color:var(--ink-dim)">Эмитенты с фьючерсами на обыкновенные и привилегированные акции: Сбербанк (SBRF/SBPR), Татнефть (TATN/TATP), Сургутнефтегаз (SNGR/SNGP). Берётся ближайшая ликвидная серия каждой ноги; параметры стратегии — текущие настройки st4.</div>
+
+  <div class="panel">
+    <div class="controls">
+      <div class="fld"><label>дней истории</label><input id="days" type="number" value="60" min="10" max="120"></div>
+      <div class="fld"><label>стоп σ (пусто = из конфига)</label><input id="stop" type="number" step="0.5" min="0" placeholder="—"></div>
+      <button id="run">▶ запустить скан</button>
+      <span id="status">—</span>
+    </div>
+    <div class="meta" id="meta"></div>
+    <div style="overflow-x:auto">
+    <table id="tbl">
+      <thead><tr>
+        <th>пара</th><th>серии</th><th>эксп.</th><th>баров</th><th>σ спреда</th><th>ADF p</th>
+        <th>сделок</th><th>win%</th><th>net ₽</th><th>%</th><th>maxDD%</th><th>стопов</th>
+        <th>net 1-я пол.</th><th>net 2-я пол.</th><th>незакрыто ₽</th>
+      </tr></thead>
+      <tbody><tr><td colspan="15" class="dim">скан ещё не запускался</td></tr></tbody>
+    </table>
+    </div>
+    <div class="meta">
+      Как читать: <b>ADF p</b> &lt; 0.05 — спред стационарен на периоде (есть что торговать);
+      <b>net по половинам</b> — грубая проверка устойчивости (одна прибыльная половина — повод не доверять);
+      <b>незакрыто ₽</b> — нереализованный P&amp;L зависшей в конце периода позиции (риск, который не виден в win-rate).
+    </div>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const fmt=(v,d=0)=>v==null?'—':Number(v).toLocaleString('ru-RU',{maximumFractionDigits:d,minimumFractionDigits:0});
+const cls=v=>v>0?'pos':(v<0?'neg':'dim');
+
+function render(rep){
+  if(!rep){return}
+  $('meta').textContent=`прогон: ${rep.date} · ${rep.days}д · BB(${rep.sma_period}, ${rep.sigma_mult}σ) · `+
+    `stop_sigma=${rep.stop_sigma} · вход ${rep.entry_trigger} · гейт ${rep.deviation_mode} · свечи ${rep.interval_min}m`;
+  const tb=$('tbl').querySelector('tbody'); tb.innerHTML='';
+  for(const r of rep.rows){
+    const tr=document.createElement('tr');
+    if(r.error){
+      tr.innerHTML=`<td>${r.pair}</td><td colspan="14" class="errrow">${r.error}</td>`;
+      tb.appendChild(tr); continue;
+    }
+    const adf=r.adf_p==null?'—':r.adf_p.toFixed(3);
+    const adfCls=r.adf_p!=null&&r.adf_p<0.05?'pos':'warn';
+    tr.innerHTML=`<td><b>${r.pair}</b></td>`+
+      `<td class="dim">${r.legs.ord}/${r.legs.pref}</td>`+
+      `<td class="dim">${(r.legs.ord_expiry||'—').slice(5)}</td>`+
+      `<td>${fmt(r.bars)}</td><td>${fmt(r.spread_sigma,1)}</td>`+
+      `<td class="${adfCls}">${adf}</td>`+
+      `<td>${fmt(r.trades)}</td><td>${fmt(r.win_rate_pct,1)}</td>`+
+      `<td class="${cls(r.net_pnl_rub)}">${fmt(r.net_pnl_rub)}</td>`+
+      `<td class="${cls(r.return_pct)}">${fmt(r.return_pct,2)}</td>`+
+      `<td>${fmt(r.max_drawdown_pct,2)}</td><td>${fmt(r.stops)}</td>`+
+      `<td class="${cls(r.net_h1)}">${fmt(r.net_h1)}</td>`+
+      `<td class="${cls(r.net_h2)}">${fmt(r.net_h2)}</td>`+
+      `<td class="${cls(r.open_unrealized_rub)}">${fmt(r.open_unrealized_rub)}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+let timer=null;
+async function refresh(){
+  try{
+    const d=await (await fetch('/st4/scan/report')).json();
+    if(d.report) render(d.report);
+    if(d.error){$('status').textContent='ошибка скана: '+d.error;$('status').className='err';}
+    else if(d.running){$('status').innerHTML='<span class="spin">◌</span> скан идёт (ISS не быстрый — до пары минут на пару)…';$('status').className='';}
+    else{$('status').textContent=d.report?'готово':'скан ещё не запускался';$('status').className='';}
+    $('run').disabled=!!d.running;
+    if(d.running&&!timer){timer=setInterval(refresh,5000);}
+    if(!d.running&&timer){clearInterval(timer);timer=null;}
+  }catch(e){$('status').textContent='нет связи с сервером';$('status').className='err';}
+}
+$('run').onclick=async()=>{
+  const days=parseInt($('days').value)||60;
+  const stop=$('stop').value===''?null:parseFloat($('stop').value);
+  let q=`/st4/scan/run?days=${days}`; if(stop!=null) q+=`&stop_sigma=${stop}`;
+  $('run').disabled=true;
+  await fetch(q,{method:'POST'});
+  refresh();
+};
+refresh();
+</script>
+</body>
+</html>

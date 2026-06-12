@@ -163,11 +163,19 @@ class OrderExecutor:
         return limit > 0
 
     def close_pair(self, pos: Position, ref_ord: float, ref_pref: float) -> PairCloseResult:
-        """Paper-выход: цена выхода = переданная цена бара (узкая книга, marketable ~ close).
+        """Paper-выход: платим полспреда книги + tick_offset, СИММЕТРИЧНО входу.
 
-        Sandbox-исполнитель переопределяет это реальным обратным ордером.
+        Раньше выход исполнялся ровно по close (бесплатно) — round-trip занижался на
+        ~(halfspread+offset)·2 тика. Sandbox переопределяет реальным обратным ордером.
         """
-        return PairCloseResult(exit_ord=ref_ord, exit_pref=ref_pref)
+        def px(spec: InstrumentSpec, entry_side: str, ref: float) -> float:
+            cost = (self.cfg.paper_book_halfspread_ticks + self.cfg.tick_offset) * spec.tick_size
+            close_side = "sell" if entry_side == "buy" else "buy"
+            return ref + cost if close_side == "buy" else ref - cost
+
+        return PairCloseResult(
+            exit_ord=px(self.spec[Role.ORDINARY], pos.leg_ord.side, ref_ord),
+            exit_pref=px(self.spec[Role.PREFERRED], pos.leg_pref.side, ref_pref))
 
 
 def leg_pnl_rub(leg: LegPosition, exit_price: float, spec: InstrumentSpec) -> float:

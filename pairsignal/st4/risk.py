@@ -37,6 +37,13 @@ class RiskManager:
             self.day_pnl_rub = 0.0
         self.day_pnl_rub += net_pnl_rub
 
+    def day_loss_breached(self, ts_ms: int, unrealized_rub: float = 0.0) -> bool:
+        """Дневной лимит убытка с учётом НЕРЕАЛИЗОВАННОГО (§11): открытая позиция
+        может превысить лимит, не закрыв ни одной сделки — реализованный day_pnl
+        этого не видит. Прибыльный unrealized лимит не ослабляет (только min(0, ·))."""
+        realized = self.day_pnl_rub if self._day_key(ts_ms) == self._day else 0.0
+        return realized + min(0.0, unrealized_rub) <= -self.cfg.max_daily_loss_rub
+
     def can_enter(self, ts_ms: int, open_positions: int) -> tuple[bool, str]:
         """Разрешён ли новый вход сейчас (§11)."""
         if self.halted:
