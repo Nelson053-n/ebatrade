@@ -330,11 +330,10 @@ tr:hover td{background:rgba(255,255,255,.015)}
   <div id="st4panel" style="display:none">
     <div class="panel fade" style="margin-bottom:14px">
       <h2 id="s4-title">st4 · Спред-арбитраж SBRF / SBPR <em id="s4-title-sub">фьючерсы Сбербанка, FORTS · Bollinger(200, 2σ)</em></h2>
-      <!-- переключатель пары (независимые форвард-тест сессии) -->
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <!-- переключатель пары (независимые форвард-тест сессии); кнопки строятся динамически -->
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
         <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--ink-faint)">пара</span>
-        <button class="ctrl-btn" id="s4-pair-sber" data-pair="sber">Сбербанк · SBRF/SBPR</button>
-        <button class="ctrl-btn" id="s4-pair-tatn" data-pair="tatn">Татнефть · TATN/TATP</button>
+        <div id="s4-pair-switch" style="display:flex;gap:8px;flex-wrap:wrap"></div>
         <button class="ctrl-btn" style="margin-left:auto" onclick="window.open('/st4/report','_blank')">📊 скан пар → отчёт</button>
       </div>
       <!-- часы МСК + режим работы биржи FORTS -->
@@ -1579,7 +1578,7 @@ $('btnMTests').onclick=async()=>{
 
 /* ===== ST4: СПРЕД-АРБИТРАЖ SBRF/SBPR ===== */
 let _s4snap=null, _s4Timer=null, _s4Started=false;
-let S4PAIR = localStorage.getItem('s4pair')||'sber';   // активная пара st4 (sber|tatn)
+let S4PAIR = localStorage.getItem('s4pair')||'sber';   // id активной пары st4 (см. /st4/pairs)
 async function s4api(path, method='GET', body=null){
   const opt={method};
   if(body!==null){ opt.headers={'Content-Type':'application/json'}; opt.body=JSON.stringify(body); }
@@ -1890,7 +1889,7 @@ function s4Render(s){
   else { dotColor='var(--signal)'; }   // прогрет, торгует/ждёт сигнал
   $('s4-status-dot').style.background=dotColor;
   $('s4-status-txt').textContent=statusTxt;
-  // заголовки вкладки/графика — по активной паре (sber/tatn)
+  // заголовки вкладки/графика — по активной паре
   if(s.asset_ord){
     $('s4-title').childNodes[0].nodeValue=`st4 · Спред-арбитраж ${s.asset_ord} / ${s.asset_pref} `;
     $('s4-title-sub').textContent=`фьючерсы ${s.pair_label||''}, FORTS · Bollinger(${s.sma_period}, ${s.sigma_mult}σ)`;
@@ -1956,9 +1955,24 @@ function s4Render(s){
 
 async function s4Poll(){ if(SLOT!==4) return; try{ s4Render(await s4api('/state')); }catch(e){} }
 
-/* --- переключатель пары st4 (sber|tatn): независимые сессии на сервере --- */
+/* --- переключатель пары st4: список приходит с сервера (/st4/pairs), кнопки строятся динамически --- */
+let S4PAIRS=[];   // [{id,ord,pref,label}]
+async function s4BuildPairSwitch(){
+  try{ S4PAIRS=(await s4api('/pairs')).pairs||[]; }catch(e){ return; }
+  if(!S4PAIRS.some(p=>p.id===S4PAIR)) S4PAIR=(S4PAIRS[0]||{}).id||'sber';
+  const box=$('s4-pair-switch'); if(!box) return;
+  box.innerHTML='';
+  S4PAIRS.forEach(p=>{
+    const b=document.createElement('button');
+    b.className='ctrl-btn'; b.id='s4-pair-'+p.id; b.dataset.pair=p.id;
+    b.textContent=`${p.label} · ${p.ord}/${p.pref}`;
+    b.onclick=()=>s4SwitchPair(p.id);
+    box.appendChild(b);
+  });
+  s4MarkPair();
+}
 function s4MarkPair(){
-  ['sber','tatn'].forEach(p=>{ const b=$('s4-pair-'+p); if(b) b.classList.toggle('approve', S4PAIR===p); });
+  S4PAIRS.forEach(p=>{ const b=$('s4-pair-'+p.id); if(b) b.classList.toggle('approve', S4PAIR===p.id); });
 }
 function s4LoadPairData(){
   s4LoadMargin();
@@ -2129,14 +2143,14 @@ function s4Init(){
       catch(e){ $('s4-tests-badge').textContent='ошибка'; }
     };
     $('s4-btn-margin').onclick=s4LoadMargin;
-    $('s4-pair-sber').onclick=()=>s4SwitchPair('sber');
-    $('s4-pair-tatn').onclick=()=>s4SwitchPair('tatn');
   }
-  s4MarkPair();
-  s4Poll();
-  s4LoadPairData();   // ГО + истории прогонов активной пары
-  // автозапуск демо, если сессии ещё не было
-  s4api('/state').then(s=>{ if(!s.session_started){ s4api('/player/start','POST').then(s4Poll); } });
+  // построить переключатель пар с сервера, затем подтянуть данные активной пары
+  s4BuildPairSwitch().then(()=>{
+    s4Poll();
+    s4LoadPairData();   // ГО + истории прогонов активной пары
+    // автозапуск демо, если сессии ещё не было
+    s4api('/state').then(s=>{ if(!s.session_started){ s4api('/player/start','POST').then(s4Poll); } });
+  });
 }
 
 /* ===== СТАРТ ===== */

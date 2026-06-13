@@ -31,6 +31,7 @@ BT_HISTORY_LEN = 60        # сколько прогонов бэктеста х
 ST4_PAIRS: dict[str, tuple[str, str, str]] = {
     "sber": ("SBRF", "SBPR", "Сбербанк"),
     "tatn": ("TATN", "TATP", "Татнефть"),
+    "sngr": ("SNGR", "SNGP", "Сургутнефтегаз"),
 }
 
 

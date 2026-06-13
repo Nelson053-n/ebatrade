@@ -919,6 +919,14 @@ from datetime import timezone as _tz  # noqa: E402
 _MSK = _tz(_td(hours=3))  # московское время для меток st4
 
 
+@app.get("/st4/pairs")
+def st4_pairs():
+    """Список доступных пар обычка/преф — фронт строит переключатель динамически
+    (новая пара добавляется ТОЛЬКО в ST4_PAIRS, UI подхватывает сам)."""
+    return {"pairs": [{"id": pid, "ord": o, "pref": p, "label": lbl}
+                      for pid, (o, p, lbl) in ST4_PAIRS.items()]}
+
+
 @app.get("/st4/state")
 def st4_state(pair: str = "sber"):
     return _st4(pair).snapshot(_server_started)
