@@ -179,6 +179,9 @@ class SlotState:
                 "strategy": self.cfg.strategy.model_dump(),
                 "paper": self.cfg.paper.model_dump(),
                 "auto_approve": self.cfg.auto_approve,
+                # для автостарта live после рестарта сервера (как у st4/st5)
+                "live": self.state["live"],
+                "paused_by_user": self.state["paused_by_user"],
             }
             _session_file(self.idx).write_text(json.dumps(_clean(data)))
         except Exception:  # noqa: BLE001  персистентность не должна ронять рантайм
@@ -213,6 +216,9 @@ class SlotState:
             ]
             self.history = data.get("history", [])
             self.state["session_started"] = data.get("session_started", time.time())
+            self.state["paused_by_user"] = bool(data.get("paused_by_user", False))
+            # автостарт live: шёл на момент сохранения и не остановлен оператором
+            self.state["resume_live"] = bool(data.get("live")) and not self.state["paused_by_user"]
             return True
         except Exception:  # noqa: BLE001
             return False
@@ -371,6 +377,11 @@ def _st5(inst: str = "sber") -> St5Session:
 async def lifespan(app: FastAPI):
     for st in SLOTS:
         st.load_session()             # восстановить результаты прошлой сессии (если есть)
+        if st.state.pop("resume_live", False):
+            # автостарт live после рестарта: продолжаем сессию без сброса журнала
+            # (_poller сам догонит бары по last_live_ts), как у st4/st5
+            st.state["live"] = True
+            asyncio.create_task(_poller(st))
     from .st4 import tbank_sandbox as _sb
     _sb.load_token()                  # подтянуть сохранённый токен T-Bank (переживает рестарт)
     for s4 in ST4S.values():
@@ -679,15 +690,20 @@ async def live_start(slot: int = 1):
     if st.state["live"]:
         return {"ok": True, "already": True}
     st.state["player"] = False        # live и плеер взаимоисключаются
+    st.state["paused_by_user"] = False  # старт снимает намеренную остановку
     st.reset_engine()                 # чистый старт live с бэкфиллом
     st.state["live"] = True
+    st.save_session()
     asyncio.create_task(_poller(st))
     return {"ok": True, "mode": "live"}
 
 
 @app.post("/live/stop")
 def live_stop(slot: int = 1):
-    _slot(slot).state["live"] = False
+    st = _slot(slot)
+    st.state["live"] = False
+    st.state["paused_by_user"] = True   # намеренная остановка — автостарт не возобновляет
+    st.save_session()
     return {"ok": True}
 
 
