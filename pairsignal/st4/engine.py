@@ -9,13 +9,14 @@ OrderExecutor → ведёт позицию/журнал/P&L → RiskManager. Re
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Optional
 
 from .config import St4Config
 from .execution import OrderExecutor, UnwindError, leg_pnl_rub, pair_fee_rub
-from .indicators import BollingerBands, SpreadBuilder
+from .indicators import BollingerBands, SpreadBuilder, VolumeAverage
 from .models import (
     BandReading,
     BotState,
@@ -49,6 +50,8 @@ class TradingEngine:
         self.spec_pref = spec_pref
         self.bb = BollingerBands(cfg.strategy.sma_period, cfg.strategy.sigma_multiplier,
                                  cfg.strategy.std_mode)
+        # средний объём бара спреда (для объёмного фильтра входа) — то же окно, что и BB
+        self.volavg = VolumeAverage(cfg.strategy.sma_period)
         self.builder = SpreadBuilder()
         # выбор исполнителя: paper (по умолчанию) или sandbox T-Bank. Sandbox-импорт локальный,
         # чтобы paper-режим и тесты не тащили сетевые зависимости. Sandbox стартует в своём
@@ -75,16 +78,24 @@ class TradingEngine:
         # на replay движок только прогревает BB (входы не открываем), а торгует с первого
         # ЖИВОГО бара. Для paper/синтетики всегда armed (поведение не меняется).
         self._armed = True
+        # гейт свежести данных активен только в live (run_live ставит True). В бэктесте/
+        # плеере (run_df) бары исторические — по wall-clock они «старые», блокировать нельзя.
+        self._check_lag = False
 
     def arm(self, on: bool) -> None:
         """Разрешить/запретить открытие новых входов (выход открытой позиции — всегда работает)."""
         self._armed = on
 
     # ---------- подача данных ----------
-    def on_candles(self, ts: int, close_ord: float, close_pref: float) -> Optional[StepResult]:
-        """Добавить закрытые свечи обеих ног за интервал ts; если бар спреда готов — step."""
-        self.builder.add_ordinary(ts, close_ord)
-        bar = self.builder.add_preferred(ts, close_pref)
+    def on_candles(self, ts: int, close_ord: float, close_pref: float,
+                   vol_ord: float = 0.0, vol_pref: float = 0.0) -> Optional[StepResult]:
+        """Добавить закрытые свечи обеих ног за интервал ts; если бар спреда готов — step.
+
+        vol_ord/vol_pref — объёмы ног за бар (0 = неизвестны: старые вызовы/синтетика без
+        объёма; объёмный фильтр в этом случае не блокирует вход).
+        """
+        self.builder.add_ordinary(ts, close_ord, vol_ord)
+        bar = self.builder.add_preferred(ts, close_pref, vol_pref)
         if bar is None:
             return None
         return self.step(bar)
@@ -119,11 +130,41 @@ class TradingEngine:
         cur = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date()
         return (exp - cur).days
 
+    # ---------- фильтры входа ----------
+    def _volume_ok(self, bar: SpreadBar) -> bool:
+        """Объёмный фильтр: пробой принимается, если объём бара ≥ mult·SMA(объёма).
+
+        Выключен при mult=0. При неизвестном объёме (bar.volume==0 — старые данные/синтетика
+        без объёма) или ненабранной/нулевой SMA фильтр НЕ блокирует: считаем непройденным
+        только реальный объём (>0), который ниже порога.
+        """
+        mult = self.cfg.strategy.volume_filter_mult
+        if mult <= 0 or bar.volume <= 0:
+            return True
+        sma = getattr(self, "_vol_sma", float("nan"))
+        if not (sma > 0):   # NaN или 0 → данных об объёме нет, не блокируем
+            return True
+        return bar.volume >= mult * sma
+
+    def _data_fresh(self, bar: SpreadBar) -> bool:
+        """Гейт свежести: бар не старше max_data_lag_min минут (по wall-clock).
+
+        Активен только в live (self._check_lag=True) — в бэктесте/плеере исторические бары
+        по часам «старые», но это нормально. Выключен при max_data_lag_min=0.
+        """
+        lag_max = self.cfg.strategy.max_data_lag_min
+        if not self._check_lag or lag_max <= 0:
+            return True
+        return (time.time() * 1000 - bar.ts) <= lag_max * 60_000
+
     # ---------- основной шаг FSM ----------
     def step(self, bar: SpreadBar) -> StepResult:
         self._last_spread_bar = bar
         band = self.bb.update(bar.ts, bar.spread)
         self.last_band = band
+        # средний объём — обновляем на КАЖДОМ баре (то же окно, что BB), чтобы фильтр был
+        # синхронен с полосами. NaN на прогреве и при нулевых объёмах не мешает (см. гейт ниже).
+        self._vol_sma = self.volavg.update(bar.volume)
         events: list[EngineEvent] = []
 
         if self.state == BotState.HALTED:
@@ -172,8 +213,19 @@ class TradingEngine:
                     sigma_stop = band.spread >= band.sma + ss * band.sigma
                 elif self.state == BotState.LONG_SPREAD:
                     sigma_stop = band.spread <= band.sma - ss * band.sigma
-            if crossed or time_stop or sigma_stop:
-                reason = "exit" if crossed else ("stop" if sigma_stop else "time_stop")
+            # тейк-профит (опц.): спред почти вернулся к SMA (в пределах take·σ внутри канала) —
+            # фиксируем прибыль раньше полного пересечения. Только в «правильную» сторону:
+            # SHORT вошёл сверху → тейк когда спред опустился до SMA+take·σ; LONG — зеркально.
+            tp = self.cfg.strategy.take_profit_sigma
+            take = False
+            if tp > 0 and band.sigma > 0 and not crossed:
+                if self.state == BotState.SHORT_SPREAD:
+                    take = band.spread <= band.sma + tp * band.sigma
+                elif self.state == BotState.LONG_SPREAD:
+                    take = band.spread >= band.sma - tp * band.sigma
+            if crossed or time_stop or sigma_stop or take:
+                reason = ("exit" if crossed else "stop" if sigma_stop
+                          else "take" if take else "time_stop")
                 trade = self._close_position(bar, reason)
                 events.append(EngineEvent(bar.ts, "exit",
                               f"выход ({reason}): net {trade.net_pnl_rub:+.0f}₽", {}))
@@ -198,6 +250,16 @@ class TradingEngine:
                 elif in_clearing_window(exec_ts, self.cfg.session):
                     events.append(EngineEvent(bar.ts, "warn",
                                   "сигнал в клиринговом окне — пропуск", {}))
+                elif not self._volume_ok(bar):
+                    events.append(EngineEvent(bar.ts, "warn",
+                                  f"сигнал пропущен: объём {bar.volume:.0f} < "
+                                  f"{self.cfg.strategy.volume_filter_mult:g}·SMA("
+                                  f"{self._vol_sma:.0f})", {}))
+                elif not self._data_fresh(bar):
+                    lag = (time.time() * 1000 - bar.ts) / 60_000
+                    events.append(EngineEvent(bar.ts, "warn",
+                                  f"сигнал пропущен: данные устарели ({lag:.0f} мин > "
+                                  f"{self.cfg.strategy.max_data_lag_min:g})", {}))
                 else:
                     ok, why = self.risk.can_enter(bar.ts, 1 if self.position else 0)
                     if not ok:

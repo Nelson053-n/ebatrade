@@ -16,7 +16,12 @@ from pairsignal.st4.config import St4Config
 from pairsignal.st4 import data_feed as feed
 from pairsignal.st4.engine import TradingEngine
 from pairsignal.st4.execution import OrderExecutor, UnwindError, leg_pnl_rub
-from pairsignal.st4.indicators import BollingerBands, SpreadBuilder, build_band_frame
+from pairsignal.st4.indicators import (
+    BollingerBands,
+    SpreadBuilder,
+    VolumeAverage,
+    build_band_frame,
+)
 from pairsignal.st4.models import BandReading, BotState, LegPosition, Position, Role, Signal
 from pairsignal.st4.strategy import deviation_gate, entry_signal, exit_signal, in_clearing_window
 
@@ -675,3 +680,93 @@ def test_position_json_roundtrip():
     d = _json.loads(_json.dumps(asdict(pos)))    # enum'ы — str-подклассы → строки
     back = St4Session._position_from_json(d)
     assert back == pos
+
+
+# ============================ объёмный фильтр входа (2026-06-14) ============================
+
+def _warm_for_breakout(eng: TradingEngine, vol: float, n: int = 40,
+                       base: float = 32000.0) -> int:
+    """Прогрев BB шумом ±5 (полосы 100±10 не пробиваются) с заданным объёмом каждого бара.
+
+    Возвращает следующий ts. Объём подаётся в обе ноги по vol/2, чтобы SpreadBar.volume=vol.
+    """
+    ts = 0
+    for i in range(n):
+        noise = 5.0 if i % 2 == 0 else -5.0
+        eng.on_candles(ts, base, base + 100 + noise, vol / 2, vol / 2)
+        ts += 600000
+    return ts
+
+
+def test_volume_filter_blocks_low_passes_high():
+    """Объёмный фильтр: пробой с низким объёмом не входит, с высоким — входит."""
+    base = 32000.0
+    # SMA объёма на прогреве = 1000 (каждый бар vol=1000). Порог mult=1.5 → нужно ≥1500.
+    # --- низкий объём пробойного бара (500 < 1500) → вход заблокирован ---
+    cfg = St4Config()
+    cfg.strategy.sma_period = 30
+    cfg.strategy.deviation_pct = 0.0
+    cfg.strategy.volume_filter_mult = 1.5
+    so, sp = _specs()
+    eng_lo = TradingEngine(cfg, so, sp)
+    ts = _warm_for_breakout(eng_lo, vol=1000.0)
+    res = eng_lo.on_candles(ts, base, base + 250, 250, 250)   # пробой, объём 500
+    assert eng_lo.state == BotState.FLAT and eng_lo.position is None
+    assert any("объём" in e.message for e in res.events)
+    # --- высокий объём пробойного бара (4000 ≥ 1500) → вход открыт ---
+    cfg2 = St4Config(**cfg.model_dump())
+    eng_hi = TradingEngine(cfg2, *_specs())
+    ts = _warm_for_breakout(eng_hi, vol=1000.0)
+    eng_hi.on_candles(ts, base, base + 250, 2000, 2000)       # пробой, объём 4000
+    assert eng_hi.state == BotState.SHORT_SPREAD and eng_hi.position is not None
+
+
+def test_volume_filter_disabled_or_no_volume_does_not_block():
+    """mult=0 (выкл) и нулевой объём бара не блокируют вход (обратная совместимость)."""
+    base = 32000.0
+    # фильтр включён, но объёмы баров нулевые (старые данные) → не блокирует
+    cfg = St4Config()
+    cfg.strategy.sma_period = 30
+    cfg.strategy.deviation_pct = 0.0
+    cfg.strategy.volume_filter_mult = 1.5
+    eng = TradingEngine(cfg, *_specs())
+    ts = _warm_for_breakout(eng, vol=0.0)                     # объёмы=0 на всём прогоне
+    eng.on_candles(ts, base, base + 250, 0, 0)               # пробой без объёма
+    assert eng.position is not None                           # вход НЕ заблокирован
+
+
+def test_volume_average_matches_pandas_rolling():
+    """SMA объёма потокового VolumeAverage совпадает с pandas rolling mean."""
+    rng = np.random.default_rng(7)
+    vols = list(rng.poisson(1000, 250).astype("float64"))
+    period = 200
+    va = VolumeAverage(period)
+    last = None
+    for v in vols:
+        last = va.update(v)
+    exp = pd.Series(vols).rolling(period).mean().iloc[-1]
+    assert va.is_ready
+    assert last == pytest.approx(exp, abs=1e-9)
+
+
+# ============================ гейт свежести данных ============================
+
+def test_data_fresh_predicate():
+    """Гейт свежести: активен только при _check_lag=True и max_data_lag_min>0; старый бар → False."""
+    import time as _time
+    from pairsignal.st4.models import SpreadBar
+    cfg = St4Config()
+    cfg.strategy.max_data_lag_min = 30.0
+    eng = TradingEngine(cfg, *_specs())
+    now_ms = int(_time.time() * 1000)
+    fresh = SpreadBar(ts=now_ms, close_ord=0, close_pref=0, spread=0)
+    stale = SpreadBar(ts=now_ms - 60 * 60_000, close_ord=0, close_pref=0, spread=0)  # 60 мин назад
+    # _check_lag=False (бэктест/плеер) → гейт неактивен, любой бар «свежий»
+    assert eng._data_fresh(fresh) and eng._data_fresh(stale)
+    # live: гейт активен — свежий проходит, устаревший нет
+    eng._check_lag = True
+    assert eng._data_fresh(fresh)
+    assert not eng._data_fresh(stale)
+    # выключение гейта (max_data_lag_min=0) → старый бар снова «свежий»
+    cfg.strategy.max_data_lag_min = 0.0
+    assert eng._data_fresh(stale)

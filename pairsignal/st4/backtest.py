@@ -35,7 +35,9 @@ def run_backtest(df: pd.DataFrame, cfg: St4Config,
     peak = start
     max_dd = 0.0
     for ts, row in df.iterrows():
-        eng.on_candles(int(ts), float(row["price_a"]), float(row["price_b"]))
+        # объёмы ног — если df их несёт (vol_a/vol_b); иначе 0 (объёмный фильтр не сработает)
+        eng.on_candles(int(ts), float(row["price_a"]), float(row["price_b"]),
+                       float(row.get("vol_a", 0.0)), float(row.get("vol_b", 0.0)))
         eq = eng.balance_rub + eng.unrealized_rub()
         peak = max(peak, eq)
         dd = (peak - eq) / peak * 100 if peak > 0 else 0.0

@@ -246,6 +246,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <button class="strat-btn" data-slot="2">st2</button>
       <button class="strat-btn" data-slot="3">st3</button>
       <button class="strat-btn" data-slot="4">st4</button>
+      <button class="strat-btn" data-slot="5">st5</button>
     </div>
     <div class="tag" id="hdr-tag">phase 1 · paper</div>
     <div class="pair" id="hdr-pair">BTC <span>÷</span> ETH</div>
@@ -544,7 +545,132 @@ tr:hover td{background:rgba(255,255,255,.015)}
     </div>
   </div>
 
-  <!-- ПАРНЫЙ LAYOUT st1/st2 (график, аналитика, журнал, параметры) — прячется на st3/st4 -->
+  <!-- ST5: VWAP-reversion на одиночном инструменте — отдельная панель, скрыта по умолчанию -->
+  <div id="st5panel" style="display:none">
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2 id="s5-title">st5 · VWAP-reversion <em id="s5-title-sub">одиночный фьючерс, FORTS · возврат к внутридневному VWAP</em></h2>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+        <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--ink-faint)">инструмент</span>
+        <div id="s5-inst-switch" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:12px">
+        <span style="padding:5px 12px;border-radius:7px;background:var(--bg);border:1px solid var(--line);font-weight:600">🕐 <span id="s5-msk-clock">—</span> МСК</span>
+        <span id="s5-leg" style="padding:5px 12px;border-radius:7px;background:var(--bg);border:1px solid var(--line)">серия: —</span>
+        <span style="color:var(--ink-faint)">Внутридневная: VWAP сбрасывается каждый день, позиция не держится через ночь (выход к концу сессии)</span>
+      </div>
+      <details style="font-size:13px;line-height:1.75;color:var(--ink-dim)">
+        <summary style="cursor:pointer;color:var(--signal);font-weight:600;font-size:12px;user-select:none">ⓘ о стратегии</summary>
+        <div style="margin-top:10px">
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Идея.</b> Цена ликвидного фьючерса в течение дня колеблется вокруг VWAP (средневзвешенной по объёму) — якоря институциональных исполнений. Сильное отклонение от VWAP имеет тенденцию возвращаться. Торгуем возврат: при пробое коридора <code>VWAP ± k·σ</code> входим против движения (лонг под коридором, шорт над), выходим на пересечении VWAP.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Отличие от st4.</b> Не парный спред, а ОДИН инструмент — направленная ставка (лонг/шорт) с возвратом к среднему как эджем. VWAP внутридневной (сброс по дню), позиция закрывается к концу сессии (нет овернайт-риска).</p>
+        <p style="margin:0;color:var(--warn)"><b>Честно:</b> VWAP-reversion на одиночном фьючерсе — слабый эдж (net около нуля на бэктесте), в отличие от коинтегрированного спреда st4. Это форвард-тест гипотезы, не готовая прибыльная стратегия.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="grid2" style="display:grid;grid-template-columns:1.6fr 1fr;gap:14px;align-items:start">
+      <!-- LEFT -->
+      <div>
+        <div class="panel fade">
+          <h2>Цена и VWAP <em id="s5-chart-sub">пункты · коридор k·σ</em>
+            <span class="chart-tools" style="float:right;font-size:10px;color:var(--ink-faint)">колесо — зум · перетащить — сдвиг · 2× клик — сброс</span></h2>
+          <div style="position:relative;height:340px"><canvas id="s5chart" style="width:100%;height:100%"></canvas>
+            <div id="s5tip" style="display:none;position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font-size:11px;line-height:1.5;z-index:5;box-shadow:0 4px 14px rgba(0,0,0,.3)"></div></div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--ink-dim)">
+            <span><b style="color:var(--chart-line)">━</b> цена</span>
+            <span><b style="color:var(--chart-mid)">┄</b> VWAP</span>
+            <span><b style="color:var(--chart-band)">━</b> коридор ±k·σ</span>
+            <span><span style="color:var(--signal)">●</span> лонг / <span style="color:var(--short)">●</span> шорт</span>
+          </div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Журнал действий</h2>
+          <div class="jscroll" id="s5-events" style="max-height:150px;font-size:12px;line-height:1.7;color:var(--ink-dim)">—</div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Сделки</h2>
+          <div class="jscroll" style="max-height:240px"><table id="s5-trades">
+            <thead><tr><th>направл.</th><th>цена вх→вых</th><th>лотов</th><th>держал</th><th>net ₽</th><th>причина</th></tr></thead>
+            <tbody></tbody></table></div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Бэктест на истории MOEX ISS</h2>
+          <div style="font-size:11px;color:var(--ink-faint);margin-bottom:8px">Прогон VWAP-reversion на истории ISS. Внутридневная стратегия — бэктест по дням периода.</div>
+          <div class="params" style="margin-top:0;gap:10px;margin-bottom:10px">
+            <div class="fld"><label>дней</label><input id="s5-bt-days" type="number" value="30" min="5" max="120" style="width:70px"></div>
+            <div class="fld"><label>коридор σ</label><input id="s5-bt-band" type="number" value="1.5" step="0.5" min="0.5" style="width:70px"></div>
+            <button class="ctrl-btn approve" id="s5-btn-bt">▶ прогнать</button>
+            <span class="hint" id="s5-bt-msg"></span>
+          </div>
+          <div id="s5-bt-res" style="font-size:12px;line-height:1.8;color:var(--ink-dim);margin-bottom:10px"></div>
+          <div style="font-size:11px;color:var(--ink-faint);margin-bottom:6px">История прогонов</div>
+          <div class="jscroll" id="s5-bth-wrap" style="max-height:200px"><table id="s5-bth-table">
+            <thead><tr><th>дата (МСК)</th><th>дней</th><th>σ</th><th>сделок</th><th>win%</th><th>net ₽</th><th>%</th><th>maxDD%</th></tr></thead>
+            <tbody><tr><td colspan="8" class="empty" style="text-align:left">прогонов ещё не было</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- RIGHT -->
+      <div>
+        <div class="panel fade">
+          <h2>Статус</h2>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+            <span id="s5-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--ink-faint);box-shadow:0 0 8px currentColor"></span>
+            <span id="s5-status-txt" style="font-weight:600">—</span>
+          </div>
+          <div id="s5-status-sub" style="font-size:11px;color:var(--ink-dim);margin-top:5px;line-height:1.5">—</div>
+          <div id="s5-halt" style="display:none;margin-top:10px;padding:8px 12px;border-radius:8px;background:rgba(255,93,108,.12);color:var(--loss);font-weight:600"></div>
+          <div id="s5-pos" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--line);font-size:12px;line-height:1.7"></div>
+          <div id="s5-pending" style="display:none;margin-top:10px"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+            <button class="ctrl-btn approve" id="s5-btn-live">▶ live</button>
+            <button class="ctrl-btn" id="s5-btn-player">демо</button>
+            <button class="ctrl-btn" id="s5-btn-pause">❚❚ пауза</button>
+            <button class="ctrl-btn reject" id="s5-btn-flat">flat-all</button>
+            <button class="ctrl-btn" id="s5-btn-reset">сброс</button>
+          </div>
+          <div id="s5-confirm-row" style="display:none;gap:8px;margin-top:10px">
+            <button class="ctrl-btn approve" id="s5-btn-approve">✓ подтвердить</button>
+            <button class="ctrl-btn reject" id="s5-btn-reject">✗ отклонить</button>
+          </div>
+          <div style="margin-top:12px;display:flex;flex-direction:column;gap:7px;font-size:12px;color:var(--ink-dim)">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="s5-auto" checked> авто-вход (без подтверждения)</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="s5-trading" checked> торговля разрешена</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="s5-flateod" checked> закрывать к концу сессии</label>
+          </div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Результаты сессии</h2>
+          <div id="s5-summary" style="font-size:12px;line-height:1.9;color:var(--ink-dim)">—</div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Параметры</h2>
+          <div class="params" style="margin-top:0;gap:12px">
+            <div class="fld"><label>коридор σ</label><input id="s5-p-band" type="number" step="0.5" min="0.5" style="width:70px"></div>
+            <div class="fld"><label>стоп σ</label><input id="s5-p-stop" type="number" step="0.5" min="0" style="width:70px"></div>
+            <div class="fld"><label>тейк σ</label><input id="s5-p-take" type="number" step="0.5" min="0" style="width:70px"></div>
+            <div class="fld"><label>вход</label><select id="s5-p-trigger" style="width:110px"><option value="Breakout">Breakout</option><option value="ReEntry">ReEntry</option></select></div>
+            <div class="fld"><label>лотов</label><input id="s5-p-lots" type="number" min="1" style="width:70px"></div>
+          </div>
+          <button class="ctrl-btn approve" id="s5-btn-apply" style="margin-top:12px">применить</button>
+          <span class="hint" id="s5-apply-msg" style="margin-left:10px"></span>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Юнит-тесты st5 <em style="font-style:normal">контроль качества</em></h2>
+          <button class="ctrl-btn" id="s5-btn-tests">▶ запустить тесты</button>
+          <span id="s5-tests-badge" style="margin-left:12px;font-weight:600"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ПАРНЫЙ LAYOUT st1/st2 (график, аналитика, журнал, параметры) — прячется на st3/st4/st5 -->
   <div id="pairlayout">
   <div class="grid">
     <!-- LEFT: chart + indicators -->
@@ -755,7 +881,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
 /* ===== ПОДКЛЮЧЕНИЕ К BACKEND (api.py) ===== */
 const API = '';                      // тот же origin, что и панель
 const POLL_MS = 700;                 // период опроса /state
-let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v>=1&&v<=4)?v:1; }catch(e){ return 1; } })();
+let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v>=1&&v<=5)?v:1; }catch(e){ return 1; } })();
 let cfg = { entry_z:2.0, exit_z:0.2, stop_z:3.5, min_width_pct:2.0, risk_pct:2.0 };
 let snap = null;                     // последний ответ /state
 
@@ -1402,14 +1528,15 @@ function markSlot(){
   $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
     b.classList.toggle('active', +b.dataset.slot===SLOT);
   });
-  // st3 (momentum) и st4 (спред SBRF/SBPR) — отдельные панели; прячем парный layout st1/st2
-  const isM = SLOT===3, isS4 = SLOT===4;
-  const special = isM || isS4;
+  // st3 (momentum), st4 (спред SBRF/SBPR), st5 (VWAP) — отдельные панели; прячем парный layout
+  const isM = SLOT===3, isS4 = SLOT===4, isS5 = SLOT===5;
+  const special = isM || isS4 || isS5;
   // весь парный layout st1/st2 (график, аналитика, журнал, параметры) обёрнут в #pairlayout —
   // прячем его целиком на спец-вкладках, чтобы не светились чужие BTC/ETH/SOL панели.
   $('pairlayout').style.display = special ? 'none' : '';
   $('st3panel').style.display = isM ? '' : 'none';
   $('st4panel').style.display = isS4 ? '' : 'none';
+  $('st5panel').style.display = isS5 ? '' : 'none';
 }
 // загрузить конфиг/пары/пресеты/тф и подключиться к сессии активного слота
 async function initSession(){
@@ -1445,9 +1572,10 @@ async function switchSlot(n){
   SLOT=n; try{ localStorage.setItem('slot', String(n)); }catch(e){}
   markSlot();
   // сбросить локальный кэш отображения — у нового слота свой график/таймфрейм/зум
-  snap=null; _chartTF=null; resetZoom(); s4ResetZoom();
+  snap=null; _chartTF=null; resetZoom(); s4ResetZoom(); s5ResetZoom();
   if(n===3){ momInit(); return; }
   if(n===4){ s4Init(); return; }
+  if(n===5){ s5Init(); return; }
   await initSession();
 }
 $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
@@ -1807,10 +1935,11 @@ function s4fortsSession(min,dow){
   return {txt:'торги закрыты',color:'var(--ink-dim)'};
 }
 function s4Clock(){
-  if(SLOT!==4) return;
+  if(SLOT!==4 && SLOT!==5) return;
   const m=s4msk(Date.now());
   const el=$('s4-msk-clock'); if(el) el.textContent=`${m.hh}:${m.mm}:${m.ss}`;
   const se=$('s4-session'); if(se){ const s=s4fortsSession(m.min,m.dow); se.textContent='● '+s.txt; se.style.color=s.color; }
+  const el5=$('s5-msk-clock'); if(el5) el5.textContent=`${m.hh}:${m.mm}:${m.ss}`;
 }
 setInterval(s4Clock,1000);
 
@@ -2153,15 +2282,306 @@ function s4Init(){
   });
 }
 
+/* ===== ST5: VWAP-REVERSION ===== */
+let S5INST = localStorage.getItem('s5inst')||'sber';
+let _s5Started=false, _s5snap=null, _s5lastHist=null;
+let _s5zoom=1, _s5panRight=null, _s5fullLen=0;
+function s5ResetZoom(){ _s5zoom=1; _s5panRight=null; }
+function s5money(v){ return (v>=0?'+':'')+Math.round(v).toLocaleString('ru')+' ₽'; }
+async function s5api(path, method='GET', body=null){
+  const opt={method};
+  if(body!==null){ opt.headers={'Content-Type':'application/json'}; opt.body=JSON.stringify(body); }
+  const sep=path.includes('?')?'&':'?';
+  const r=await fetch(API+'/st5'+path+sep+'inst='+S5INST, opt);
+  if(!r.ok){ let d=''; try{d=(await r.json()).detail||'';}catch(e){} throw new Error(d||(path+' → '+r.status)); }
+  return r.json();
+}
+let S5INSTS=[];
+async function s5BuildInstSwitch(){
+  try{ S5INSTS=(await s5api('/instruments')).instruments||[]; }catch(e){ return; }
+  if(!S5INSTS.some(i=>i.id===S5INST)) S5INST=(S5INSTS[0]||{}).id||'sber';
+  const box=$('s5-inst-switch'); if(!box) return; box.innerHTML='';
+  S5INSTS.forEach(i=>{
+    const b=document.createElement('button'); b.className='ctrl-btn'; b.id='s5-inst-'+i.id;
+    b.textContent=`${i.label} · ${i.asset}`; b.onclick=()=>s5SwitchInst(i.id);
+    box.appendChild(b);
+  });
+  s5MarkInst();
+}
+function s5MarkInst(){ S5INSTS.forEach(i=>{ const b=$('s5-inst-'+i.id); if(b) b.classList.toggle('approve', S5INST===i.id); }); }
+async function s5SwitchInst(id){
+  if(id===S5INST) return;
+  S5INST=id; try{ localStorage.setItem('s5inst',id); }catch(e){}
+  s5MarkInst(); s5ResetZoom(); $('s5-bt-res').innerHTML=''; $('s5-bt-msg').textContent='';
+  await s5Poll(); s5LoadInstData();
+}
+function s5LoadInstData(){
+  s5api('/backtest_history').then(d=>s5RenderBtHistory(d.history||[])).catch(()=>{});
+}
+
+async function s5Poll(){ if(SLOT!==5) return; try{ s5Render(await s5api('/state')); }catch(e){} }
+
+function s5Render(s){
+  _s5snap=s;
+  // заголовки
+  if(s.asset){
+    $('s5-title').childNodes[0].nodeValue=`st5 · VWAP-reversion ${s.asset} `;
+    $('s5-title-sub').textContent=`${s.inst_label||''}, FORTS · возврат к внутридневному VWAP`;
+  }
+  $('s5-leg').textContent = 'серия: '+(s.leg && s.leg.code || '—')+(s.leg&&s.leg.expiry?` (эксп. ${s.leg.expiry.slice(5)})`:'');
+  // статус
+  let dot='var(--ink-faint)', txt=s.wait_reason||'—';
+  if(s.halted){ dot='var(--loss)'; }
+  else if(s.position){ dot='var(--short)'; }
+  else if(!s.warmup_done){ dot='var(--warn)'; }
+  else if(s.live||s.player){ dot='var(--signal)'; }
+  $('s5-status-dot').style.background=dot;
+  $('s5-status-txt').textContent = s.live?'LIVE':(s.player?'демо':'остановлено');
+  let sub=s.strategy_name||'';
+  if(s.cur_z!=null) sub+=` · z=${s.cur_z>=0?'+':''}${s.cur_z}`;
+  if(s.data_source==='live'&&s.data_lag_min!=null) sub+=` · бар ${s.data_lag_min} мин назад`;
+  $('s5-status-sub').textContent=sub;
+  // halt
+  const h=$('s5-halt');
+  if(s.halted){ h.style.display=''; h.textContent='⚠ HALTED: '+(s.halt_reason||'')+' — снимите через сброс/resume'; }
+  else h.style.display='none';
+  // позиция
+  const pb=$('s5-pos');
+  if(s.position){
+    const p=s.position, col=p.unrealized_rub>=0?'var(--signal)':'var(--loss)';
+    pb.style.display='';
+    pb.innerHTML=`<b style="color:${p.state==='long'?'var(--signal)':'var(--short)'}">${p.state==='long'?'ЛОНГ':'ШОРТ'}</b> ${p.lots} лот · вход @ ${p.entry_price} (VWAP ${p.entry_vwap})<br>`
+      +`держит ${p.bars_held} бар · нереализ <b style="color:${col}">${s5money(p.unrealized_rub)}</b>`;
+  } else pb.style.display='none';
+  // pending
+  const pe=$('s5-pending'), cr=$('s5-confirm-row');
+  if(s.pending){ pe.style.display=''; cr.style.display='flex';
+    pe.innerHTML=`<div style="padding:8px 12px;border-radius:8px;background:rgba(255,182,72,.12);color:var(--warn);font-size:12px">сигнал <b>${s.pending.signal.toUpperCase()}</b> · цена ${s.pending.price} / VWAP ${s.pending.vwap}</div>`;
+  } else { pe.style.display='none'; cr.style.display='none'; }
+  // чекбоксы
+  $('s5-auto').checked=!!s.auto_approve; $('s5-trading').checked=!!s.trading_enabled;
+  $('s5-flateod').checked=!!s.flat_at_session_end;
+  // summary
+  const sm=s.summary||{};
+  $('s5-summary').innerHTML=
+    `сделок <b>${sm.trades||0}</b> · win <b style="color:var(--signal)">${sm.win_rate_pct||0}%</b><br>`+
+    `net <b style="color:${(sm.net_pnl_rub||0)>=0?'var(--signal)':'var(--loss)'}">${s5money(sm.net_pnl_rub||0)}</b> · комиссии ${s5money(-(sm.fees_rub||0))}<br>`+
+    `equity <b>${Math.round(sm.equity_rub||0).toLocaleString('ru')} ₽</b> (${fmt(sm.return_pct||0,3)}%) · стопов ${sm.stops||0}`;
+  // параметры (только если не редактируется)
+  if(document.activeElement && document.activeElement.id && document.activeElement.id.startsWith('s5-p-')){}
+  else { $('s5-p-band').value=s.band_sigma; $('s5-p-stop').value=s.stop_sigma;
+    $('s5-p-take').value=s.take_profit_sigma; $('s5-p-trigger').value=s.entry_trigger;
+    $('s5-p-lots').value=(s.summary&&s.cfg_lots)||$('s5-p-lots').value||1; }
+  // журнал
+  const ev=$('s5-events');
+  if(s.events&&s.events.length){
+    const kc={position:'var(--signal)',exit:'var(--ink)',halt:'var(--loss)',warn:'var(--warn)',info:'var(--ink-dim)',signal:'var(--warn)'};
+    ev.innerHTML=s.events.slice().reverse().map(e=>{
+      const m=s4msk(e.ts*1000); return `<div><span style="color:var(--ink-faint)">${m.hh}:${m.mm}</span> <span style="color:${kc[e.kind]||'var(--ink-dim)'}">${e.message}</span></div>`;
+    }).join('');
+  } else ev.textContent='—';
+  // сделки
+  s5RenderTrades(s.trades||[]);
+  // график
+  window._s5tradeStart=s.trade_start_ts||null;
+  s5DrawChart(s.history||[], s.trades||[], s.position||null);
+}
+
+function s5RenderTrades(trades){
+  const tb=$('s5-trades').querySelector('tbody'); tb.innerHTML='';
+  if(!trades.length){ tb.innerHTML='<tr><td colspan="6" class="empty">сделок ещё не было</td></tr>'; return; }
+  trades.slice().reverse().forEach(t=>{
+    const dir=t.state==='long'?'<span style="color:var(--signal)">лонг</span>':'<span style="color:var(--short)">шорт</span>';
+    const rs={exit:'возврат к VWAP',take:'тейк',stop:'стоп σ',eod:'конец сессии',time_stop:'тайм-стоп',flat_all:'flat-all',rollover:'роллировер'}[t.reason]||t.reason;
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${dir}</td><td>${Math.round(t.entry_price)} → ${Math.round(t.exit_price)}</td>`+
+      `<td>${t.lots}</td><td>${t.bars_held}</td>`+
+      `<td style="color:${t.net_pnl_rub>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s5money(t.net_pnl_rub)}</td>`+
+      `<td style="color:var(--ink-dim)">${rs}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+function s5RenderBtHistory(hist){
+  const tb=$('s5-bth-table').querySelector('tbody'); tb.innerHTML='';
+  if(!hist.length){ tb.innerHTML='<tr><td colspan="8" class="empty" style="text-align:left">прогонов ещё не было</td></tr>'; return; }
+  hist.slice().reverse().forEach(h=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${h.date}</td><td>${h.days}</td><td>${h.band_sigma}</td><td>${h.trades}</td><td>${h.win_rate_pct}</td>`+
+      `<td style="color:${h.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(h.net_pnl_rub)}</td><td>${fmt(h.return_pct,2)}</td><td>${h.max_drawdown_pct}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+// график цена+VWAP+коридор (структурно как s4DrawChart, поля price/vwap/upper/lower)
+function s5DrawChart(hist, trades, openPos){
+  const cv=$('s5chart'); if(!cv) return;
+  if(arguments.length>0) _s5lastHist={hist:hist||[], trades:trades||[], openPos:openPos||null};
+  const data=_s5lastHist||{hist:[],trades:[],openPos:null};
+  const r=cv.getBoundingClientRect();
+  if(r.width<5||r.height<5){ requestAnimationFrame(()=>s5DrawChart()); return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  const full=(data.hist||[]).filter(p=>p.vwap!=null&&!Number.isNaN(p.vwap));
+  if(full.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев VWAP…',12,24); return; }
+  _s5fullLen=full.length;
+  const visN=Math.max(10, Math.round(full.length*_s5zoom));
+  const right=_s5panRight==null?full.length:Math.min(full.length,Math.max(visN,_s5panRight));
+  const left=Math.max(0,right-visN);
+  const series=full.slice(left,right);
+  if(series.length<2) return;
+  const cs=getComputedStyle(document.documentElement);
+  const C={fill:cs.getPropertyValue('--chart-fill').trim(),band:cs.getPropertyValue('--chart-band').trim(),
+           mid:cs.getPropertyValue('--chart-mid').trim(),line:cs.getPropertyValue('--chart-line').trim(),
+           ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
+  const ML=54,MB=22,MT=6,MR=8;
+  const px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const all=series.flatMap(p=>[p.upper,p.lower,p.price]);
+  let lo=Math.min(...all), hi=Math.max(...all); const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
+  const x=i=>px0+i/(series.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
+  ctx.font='9px IBM Plex Mono, monospace'; ctx.textBaseline='middle'; ctx.textAlign='right';
+  const TY=5;
+  for(let i=0;i<=TY;i++){ const v=lo+(hi-lo)*i/TY, yy=y(v);
+    ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.5;
+    ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(v.toFixed(0), px0-6, yy); }
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  const TX=Math.min(5,series.length-1);
+  for(let i=0;i<=TX;i++){ const idx=Math.round(i/TX*(series.length-1)), xx=x(idx);
+    const lbl=series[idx].ts?s4tsLabel(series[idx].ts):('#'+idx);
+    ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.35;
+    ctx.beginPath(); ctx.moveTo(xx,py0); ctx.lineTo(xx,py1); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(lbl, xx, py1+5); }
+  // заливка коридора
+  ctx.beginPath(); series.forEach((p,i)=>{const X=x(i),Y=y(p.upper); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  for(let i=series.length-1;i>=0;i--) ctx.lineTo(x(i),y(series[i].lower));
+  ctx.closePath(); ctx.fillStyle=C.fill; ctx.fill();
+  ['upper','lower'].forEach(k=>{ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p[k]);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.band;ctx.lineWidth=1;ctx.stroke();});
+  // VWAP (пунктир)
+  ctx.setLineDash([4,4]);ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.vwap);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.mid;ctx.stroke();ctx.setLineDash([]);
+  // цена
+  ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.price);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  ctx.strokeStyle=C.line;ctx.lineWidth=1.6;ctx.stroke();
+  // сделки
+  const win=cs.getPropertyValue('--signal').trim(), loss=cs.getPropertyValue('--loss').trim();
+  const ink=cs.getPropertyValue('--ink').trim(), panel=cs.getPropertyValue('--panel').trim();
+  const t0=series[0].ts, t1=series[series.length-1].ts;
+  const inRange=ts=>ts!=null && ts>=t0-1 && ts<=t1+1;
+  const idxAt=ts=>{ let bi=0,bd=Infinity; series.forEach((p,i)=>{const d=Math.abs((p.ts||0)-ts); if(d<bd){bd=d;bi=i;}}); return bi; };
+  const ring=(X,Y,col)=>{ ctx.beginPath();ctx.arc(X,Y,4,0,7);ctx.fillStyle=panel;ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=col;ctx.stroke(); };
+  (data.trades||[]).forEach(t=>{
+    if(!inRange(t.entry_ts)) return;
+    const col=t.net_pnl_rub>=0?win:loss;
+    const i1=idxAt(t.entry_ts), X1=x(i1), Y1=y(series[i1].price);
+    if(inRange(t.exit_ts)){ const i2=idxAt(t.exit_ts), X2=x(i2), Y2=y(series[i2].price);
+      ctx.save(); ctx.globalAlpha=.35; ctx.strokeStyle=col; ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(X2,Y2);ctx.stroke(); ctx.restore(); ring(X2,Y2,col); }
+    ring(X1,Y1,ink);
+  });
+  const op=data.openPos;
+  if(op && inRange(op.entry_ts)){
+    const i1=idxAt(op.entry_ts), X1=x(i1), Y1=y(series[i1].price);
+    const Xc=x(series.length-1), Yc=y(series[series.length-1].price);
+    const col=op.unrealized_rub>=0?win:loss;
+    ctx.save(); ctx.globalAlpha=.4; ctx.strokeStyle=col; ctx.setLineDash([3,3]); ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(X1,Y1);ctx.lineTo(Xc,Yc);ctx.stroke(); ctx.restore();
+    ring(X1,Y1, op.state==='short'?cs.getPropertyValue('--short').trim():win);
+  }
+  const lastp=series[series.length-1], lx=x(series.length-1), ly=y(lastp.price);
+  ctx.beginPath();ctx.arc(lx,ly,3.5,0,7);ctx.fillStyle=C.line;ctx.shadowColor=C.line;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
+  window._s5geom={series,x,y,px0,px1,py0,py1};
+}
+function s5Redraw(){ if(_s5lastHist) s5DrawChart(); }
+
+function s5Init(){
+  if(!_s5Started){
+    _s5Started=true;
+    const cv=$('s5chart');
+    cv.addEventListener('wheel',e=>{ e.preventDefault(); if(_s5fullLen<2) return;
+      const k=e.deltaY<0?0.85:1/0.85; const nz=Math.min(1,Math.max(10/_s5fullLen,_s5zoom*k));
+      if(_s5panRight==null) _s5panRight=_s5fullLen; _s5zoom=nz; if(_s5zoom>=1){_s5panRight=null;} s5Redraw();
+    },{passive:false});
+    let drag=null;
+    cv.addEventListener('mousedown',e=>{ drag={x:e.clientX,panRight:_s5panRight==null?_s5fullLen:_s5panRight}; cv.style.cursor='grabbing'; });
+    addEventListener('mousemove',e=>{ if(!drag||_s5fullLen<2) return;
+      const W=cv.getBoundingClientRect().width; const visN=Math.max(10,Math.round(_s5fullLen*_s5zoom));
+      const dxBars=Math.round((e.clientX-drag.x)/W*visN); let nr=drag.panRight-dxBars;
+      nr=Math.max(visN,Math.min(_s5fullLen,nr)); _s5panRight=nr>=_s5fullLen?null:nr; s5Redraw();
+    });
+    addEventListener('mouseup',()=>{ if(drag){ drag=null; cv.style.cursor='crosshair'; } });
+    cv.addEventListener('dblclick',()=>{ s5ResetZoom(); s5Redraw(); });
+    cv.style.cursor='crosshair';
+    cv.addEventListener('mousemove',e=>{
+      const g=window._s5geom, tip=$('s5tip'); if(!g||!tip) return;
+      const r=cv.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+      if(mx<g.px0||mx>g.px1||my<g.py0||my>g.py1){ tip.style.display='none'; return; }
+      const n=g.series.length, frac=(mx-g.px0)/(g.px1-g.px0);
+      const idx=Math.max(0,Math.min(n-1,Math.round(frac*(n-1)))), p=g.series[idx];
+      const z=p.sigma>0?((p.price-p.vwap)/p.sigma):0; const m=s4msk(p.ts);
+      tip.innerHTML=`<b>${m.hh}:${m.mm}</b> МСК<br>цена <b>${Math.round(p.price)}</b> · z ${z>=0?'+':''}${z.toFixed(2)}<br>VWAP ${Math.round(p.vwap)} · коридор [${Math.round(p.lower)}..${Math.round(p.upper)}]`;
+      tip.style.display='block'; const tw=tip.offsetWidth||140;
+      tip.style.left=Math.min(mx+12,r.width-tw-6)+'px'; tip.style.top=Math.max(6,my-10)+'px';
+    });
+    cv.addEventListener('mouseleave',()=>{ const t=$('s5tip'); if(t)t.style.display='none'; });
+    $('s5-btn-live').onclick=async()=>{ try{ await s5api('/control/start','POST'); s5Poll(); }catch(e){alert(e.message);} };
+    $('s5-btn-player').onclick=async()=>{ await s5api('/player/start','POST'); s5Poll(); };
+    $('s5-btn-pause').onclick=async()=>{ const s=_s5snap||{}; if(s.live) await s5api('/control/stop','POST'); else if(s.player) await s5api('/player/stop','POST'); else await s5api(s.data_source==='live'?'/control/start':'/player/start','POST'); s5Poll(); };
+    $('s5-btn-flat').onclick=async()=>{ if(!confirm('Закрыть позицию по рынку (flat-all)?')) return; await s5api('/control/flat-all','POST',{confirm:true}); s5Poll(); };
+    $('s5-btn-reset').onclick=async()=>{ if(!confirm('Сбросить сессию st5 (журнал/баланс)?')) return; await s5api('/reset','POST'); s5Poll(); };
+    $('s5-auto').onchange=async(e)=>{ await s5api('/auto?on='+e.target.checked,'POST'); s5Poll(); };
+    $('s5-trading').onchange=async(e)=>{ await s5api('/control/trading?on='+e.target.checked,'POST'); s5Poll(); };
+    $('s5-flateod').onchange=async(e)=>{ await s5api('/config','POST',{flat_at_session_end:e.target.checked}); s5Poll(); };
+    $('s5-btn-approve').onclick=async()=>{ await s5api('/approve','POST'); s5Poll(); };
+    $('s5-btn-reject').onclick=async()=>{ await s5api('/reject','POST'); s5Poll(); };
+    $('s5-btn-apply').onclick=async()=>{
+      const body={ band_sigma:+$('s5-p-band').value, stop_sigma:+$('s5-p-stop').value,
+        take_profit_sigma:+$('s5-p-take').value, entry_trigger:$('s5-p-trigger').value, quantity_lots:+$('s5-p-lots').value };
+      $('s5-apply-msg').textContent='применяю…';
+      try{ await s5api('/config','POST',body); $('s5-apply-msg').textContent='✓'; s5Poll(); }
+      catch(e){ $('s5-apply-msg').textContent='ошибка: '+e.message; }
+    };
+    $('s5-btn-bt').onclick=async()=>{
+      const days=+$('s5-bt-days').value, band=+$('s5-bt-band').value;
+      $('s5-bt-msg').textContent='загрузка истории ISS…'; $('s5-btn-bt').disabled=true;
+      try{
+        const d=await s5api(`/backtest?days=${days}&band_sigma=${band}`);
+        if(d.error){ $('s5-bt-msg').textContent=d.error; }
+        else{ $('s5-bt-msg').textContent='';
+          $('s5-bt-res').innerHTML=
+            `<b>${d.leg.code}</b> · ${d.bars} баров · сделок <b>${d.trades}</b><br>`+
+            `win-rate <b style="color:var(--signal)">${d.win_rate_pct}%</b> · net <b style="color:${d.net_pnl_rub>=0?'var(--signal)':'var(--loss)'}">${s5money(d.net_pnl_rub)}</b> (${fmt(d.return_pct,2)}%)<br>`+
+            `<b>maxDD ${d.max_drawdown_pct}%</b> · стопов ${d.stops} · конец сессии ${d.eod_exits} · ср.держание ${d.avg_bars_held} бар<br>`+
+            `ср.проскальзывание ${d.avg_slippage_ticks}t · комиссии ${s5money(-d.fees_rub)}`+
+            (d.open_position?`<br><span style="color:var(--warn)">осталась открытая ${d.open_position}: нереализ ${s5money(d.open_unrealized_rub)}</span>`:'');
+          s5RenderBtHistory(d.history||[]);
+        }
+      }catch(e){ $('s5-bt-msg').textContent='ошибка: '+e.message; }
+      $('s5-btn-bt').disabled=false;
+    };
+    $('s5-btn-tests').onclick=async()=>{
+      $('s5-tests-badge').textContent='запуск…';
+      try{ const d=await s5api('/tests'); $('s5-tests-badge').innerHTML = d.ok? `<span style="color:var(--signal)">✓ ${d.passed} passed</span>` : `<span style="color:var(--loss)">${d.failed} failed / ${d.passed} passed</span>`; }
+      catch(e){ $('s5-tests-badge').textContent='ошибка'; }
+    };
+  }
+  s5BuildInstSwitch().then(()=>{
+    s5Poll(); s5LoadInstData();
+    s5api('/state').then(s=>{ if(!s.session_started){ s5api('/player/start','POST').then(s5Poll); } });
+  });
+}
+
 /* ===== СТАРТ ===== */
-resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history); if(SLOT===4)s4Redraw();});
+resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history); if(SLOT===4)s4Redraw(); if(SLOT===5)s5Redraw();});
 (async()=>{
   markSlot();
   if(SLOT===3){ momInit(); }
   else if(SLOT===4){ s4Init(); }
+  else if(SLOT===5){ s5Init(); }
   else { await initSession(); }
-  setInterval(()=>{ if(SLOT!==3 && SLOT!==4) poll(); }, POLL_MS);
+  setInterval(()=>{ if(SLOT!==3 && SLOT!==4 && SLOT!==5) poll(); }, POLL_MS);
   setInterval(()=>{ if(SLOT===4) s4Poll(); }, 1500);
+  setInterval(()=>{ if(SLOT===5) s5Poll(); }, 1500);
 })();
 </script>
 </body>

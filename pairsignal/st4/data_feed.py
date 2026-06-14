@@ -116,9 +116,9 @@ def resolve_legs(cfg: St4Config) -> tuple[InstrumentSpec, InstrumentSpec]:
             instrument_spec(pref_code, Role.PREFERRED))
 
 
-def _candles(secid: str, interval: int, since: datetime | None = None,
-             count: int | None = None) -> pd.Series:
-    """Close-серия свечей секции по begin-времени (UTC ms).
+def _candles_ohlcv(secid: str, interval: int, since: datetime | None = None,
+                   count: int | None = None) -> pd.DataFrame:
+    """Close+volume свечей секции по begin-времени (UTC ms) → DataFrame[close, volume].
 
     ISS отдаёт свечи страницами по ~500, ВСЕГДА от старых к новым через start=. Чтобы
     получить последние `count` баров, листаем все страницы до конца (start += page) и
@@ -134,12 +134,13 @@ def _candles(secid: str, interval: int, since: datetime | None = None,
         span_min = count * interval * 1.6 + 3 * 24 * 60   # ×1.6 на простои + 3 дня выходных
         since = datetime.now(timezone.utc) - timedelta(minutes=span_min)
     frm = f"&from={since.strftime('%Y-%m-%d')}" if since else ""
-    out: dict[int, float] = {}
+    closes: dict[int, float] = {}
+    vols: dict[int, float] = {}
     start = 0
     while True:
         url = (f"{ISS}/engines/futures/markets/forts/securities/{secid}/candles.json"
                f"?iss.meta=off&interval={icode}{frm}&start={start}"
-               "&candles.columns=close,begin")
+               "&candles.columns=close,volume,begin")
         rows = _table(_get(url), "candles")
         if not rows:
             break
@@ -147,32 +148,41 @@ def _candles(secid: str, interval: int, since: datetime | None = None,
             # begin — московское время сессии FORTS; метим как MSK → корректный UTC unix ms
             ts = int(datetime.strptime(r["begin"], "%Y-%m-%d %H:%M:%S")
                      .replace(tzinfo=_MSK).timestamp() * 1000)
-            out[ts] = float(r["close"])
+            closes[ts] = float(r["close"])
+            vols[ts] = float(r.get("volume") or 0.0)
         start += len(rows)
         if len(rows) < 500:  # последняя страница (ISS отдаёт по 500)
             break
-    s = pd.Series(out, dtype="float64").sort_index()
-    s.index.name = "ts"
+    df = pd.DataFrame({"close": pd.Series(closes, dtype="float64"),
+                       "volume": pd.Series(vols, dtype="float64")}).sort_index()
+    df.index.name = "ts"
     if count is not None:
-        s = s.iloc[-count:]
-    return s
+        df = df.iloc[-count:]
+    return df
+
+
+def _candles(secid: str, interval: int, since: datetime | None = None,
+             count: int | None = None) -> pd.Series:
+    """Close-серия свечей секции (тонкая обёртка над _candles_ohlcv)."""
+    return _candles_ohlcv(secid, interval, since=since, count=count)["close"]
 
 
 def read_ohlcv_moex(cfg: St4Config, limit: int = 600,
                     ord_code: str | None = None, pref_code: str | None = None) -> pd.DataFrame:
-    """Close обеих ног (SBRF, SBPR) за последние ~limit баров, inner-join по времени.
+    """Close+volume обеих ног (SBRF, SBPR) за последние ~limit баров, inner-join по времени.
 
-    price_a = SBRF (обыкновенные), price_b = SBPR (привилегированные). Спред в индикаторах
-    считается как close_pref − close_ord (= price_b − price_a), знак по ТЗ §2.
-    Коды серий можно передать явно (фиксируем на сессию), иначе берём из resolve_legs.
+    price_a = SBRF (обыкновенные), price_b = SBPR (привилегированные); vol_a/vol_b — объёмы
+    ног (для объёмного фильтра входа). Спред в индикаторах считается как close_pref − close_ord
+    (= price_b − price_a), знак по ТЗ §2. Коды серий можно передать явно, иначе из resolve_legs.
     """
     if ord_code is None or pref_code is None:
         spec_ord, spec_pref = resolve_legs(cfg)
         ord_code, pref_code = spec_ord.code, spec_pref.code
     iv = cfg.strategy.candle_interval_minutes
-    a = _candles(ord_code, iv, count=limit)    # SBRF
-    b = _candles(pref_code, iv, count=limit)   # SBPR
-    df = pd.DataFrame({"price_a": a, "price_b": b}).dropna().sort_index()
+    a = _candles_ohlcv(ord_code, iv, count=limit)    # SBRF
+    b = _candles_ohlcv(pref_code, iv, count=limit)   # SBPR
+    df = pd.DataFrame({"price_a": a["close"], "price_b": b["close"],
+                       "vol_a": a["volume"], "vol_b": b["volume"]}).dropna().sort_index()
     return df
 
 
@@ -197,7 +207,10 @@ def read_ohlcv_tbank(cfg: St4Config, limit: int, uid_ord: str, uid_pref: str) ->
     a = pd.Series(dict(_sb.get_candles(uid_ord, iv, frm, to)), dtype="float64").sort_index()
     b = pd.Series(dict(_sb.get_candles(uid_pref, iv, frm, to)), dtype="float64").sort_index()
     a.index.name = b.index.name = "ts"
-    df = pd.DataFrame({"price_a": a, "price_b": b}).dropna().sort_index()
+    # T-Bank get_candles отдаёт только close (без объёма) → vol_a/vol_b=0: объёмный фильтр
+    # на T-Bank-данных не срабатывает (по дизайну — фильтруем только при реальном объёме).
+    df = pd.DataFrame({"price_a": a, "price_b": b, "vol_a": 0.0, "vol_b": 0.0}) \
+        .dropna(subset=["price_a", "price_b"]).sort_index()
     return df.iloc[-limit:] if len(df) > limit else df
 
 
@@ -208,9 +221,10 @@ def read_ohlcv_moex_range(cfg: St4Config, since: datetime,
         spec_ord, spec_pref = resolve_legs(cfg)
         ord_code, pref_code = spec_ord.code, spec_pref.code
     iv = cfg.strategy.candle_interval_minutes
-    a = _candles(ord_code, iv, since=since)
-    b = _candles(pref_code, iv, since=since)
-    df = pd.DataFrame({"price_a": a, "price_b": b}).dropna().sort_index()
+    a = _candles_ohlcv(ord_code, iv, since=since)
+    b = _candles_ohlcv(pref_code, iv, since=since)
+    df = pd.DataFrame({"price_a": a["close"], "price_b": b["close"],
+                       "vol_a": a["volume"], "vol_b": b["volume"]}).dropna().sort_index()
     return df
 
 
@@ -237,9 +251,14 @@ def generate_synthetic(n: int = 1500, seed: int = 23, interval_min: int = 10) ->
     # округляем к шагу цены (MINSTEP=1) — как реальные котировки FORTS
     price_ord = np.round(price_ord)
     price_pref = np.round(price_pref)
+    # синтетический объём ног (пуассон вокруг среднего) — чтобы объёмный фильтр было на чём
+    # обкатать офлайн. Реальной информации не несёт, как и сам синтетический спред.
+    vol_ord = rng.poisson(1000, n).astype("float64")
+    vol_pref = rng.poisson(600, n).astype("float64")
     step = interval_min * 60_000
     ts = (np.arange(n) * step + 1_700_000_000_000).astype("int64")
-    df = pd.DataFrame({"price_a": price_ord, "price_b": price_pref}, index=ts)
+    df = pd.DataFrame({"price_a": price_ord, "price_b": price_pref,
+                       "vol_a": vol_ord, "vol_b": vol_pref}, index=ts)
     df.index.name = "ts"
     return df
 

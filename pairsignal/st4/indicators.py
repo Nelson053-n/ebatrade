@@ -60,29 +60,58 @@ class BollingerBands:
             self._buf.append(s)
 
 
+class VolumeAverage:
+    """Потоковая SMA объёма бара спреда на кольцевом буфере period значений.
+
+    Аналог BollingerBands по структуре буфера; даёт скользящее среднее объёма для
+    объёмного фильтра входа. is_ready — пока буфер не полон (как у BB).
+    """
+
+    def __init__(self, period: int = 200) -> None:
+        self.period = period
+        self._buf: deque[float] = deque(maxlen=period)
+
+    @property
+    def is_ready(self) -> bool:
+        return len(self._buf) >= self.period
+
+    def update(self, volume: float) -> float:
+        """Добавить объём бара, вернуть SMA по текущему окну (NaN, пока пуст)."""
+        self._buf.append(volume)
+        if not self._buf:
+            return float("nan")
+        return math.fsum(self._buf) / len(self._buf)
+
+
 class SpreadBuilder:
     """Синхронизация свечей двух ног и построение баров спреда (§7).
 
     spread(t) = Close(SBPR, t) − Close(SBRF, t). Бар формируется только когда обе ноги
     для интервала закрылись; пропуск одной ноги → бар не строится (значение не подставляем).
+    Объёмы ног (если переданы) суммируются в SpreadBar.volume для объёмного фильтра.
     """
 
     def __init__(self) -> None:
-        self._ord: dict[int, float] = {}    # ts → Close(SBRF)
-        self._pref: dict[int, float] = {}   # ts → Close(SBPR)
+        self._ord: dict[int, float] = {}        # ts → Close(SBRF)
+        self._pref: dict[int, float] = {}       # ts → Close(SBPR)
+        self._vol_ord: dict[int, float] = {}    # ts → Volume(SBRF)
+        self._vol_pref: dict[int, float] = {}   # ts → Volume(SBPR)
 
-    def add_ordinary(self, ts: int, close: float) -> SpreadBar | None:
+    def add_ordinary(self, ts: int, close: float, volume: float = 0.0) -> SpreadBar | None:
         self._ord[ts] = close
+        self._vol_ord[ts] = volume
         return self._try(ts)
 
-    def add_preferred(self, ts: int, close: float) -> SpreadBar | None:
+    def add_preferred(self, ts: int, close: float, volume: float = 0.0) -> SpreadBar | None:
         self._pref[ts] = close
+        self._vol_pref[ts] = volume
         return self._try(ts)
 
     def _try(self, ts: int) -> SpreadBar | None:
         if ts in self._ord and ts in self._pref:
             o, p = self._ord[ts], self._pref[ts]
-            return SpreadBar(ts=ts, close_ord=o, close_pref=p, spread=p - o)
+            vol = self._vol_ord.get(ts, 0.0) + self._vol_pref.get(ts, 0.0)
+            return SpreadBar(ts=ts, close_ord=o, close_pref=p, spread=p - o, volume=vol)
         return None
 
 

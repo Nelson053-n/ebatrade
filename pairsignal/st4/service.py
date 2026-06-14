@@ -349,6 +349,7 @@ class St4Session:
         последней закрытой свечи — ждём новые (раз в interval). Формирующийся бар не берём.
         """
         replayed = False
+        self.engine._check_lag = True   # гейт свежести активен только в live
         # sandbox исполняет по ТЕКУЩЕЙ цене T-Bank → на backfill-replay (исторические бары)
         # реальные ордера бессмысленны. На replay движок disarmed (только прогрев BB);
         # arm включаем после replay — торгуем с первого живого бара. Для paper всегда armed.
@@ -418,7 +419,9 @@ class St4Session:
                             else:
                                 break
                         res = self.engine.on_candles(ts, float(row["price_a"]),
-                                                     float(row["price_b"]))
+                                                     float(row["price_b"]),
+                                                     float(row.get("vol_a", 0.0)),
+                                                     float(row.get("vol_b", 0.0)))
                         self.last_live_ts = ts
                         new_bars += 1
                         if res is not None:
@@ -461,7 +464,9 @@ class St4Session:
                 ts = int(self.player_df.index[self.player_idx])
                 row = self.player_df.iloc[self.player_idx]
                 self.player_idx += 1
-                res = self.engine.on_candles(ts, float(row["price_a"]), float(row["price_b"]))
+                res = self.engine.on_candles(ts, float(row["price_a"]), float(row["price_b"]),
+                                             float(row.get("vol_a", 0.0)),
+                                             float(row.get("vol_b", 0.0)))
                 if res is not None:
                     self.push_history(ts)
                     if res.events:

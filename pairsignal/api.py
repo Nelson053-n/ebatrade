@@ -352,6 +352,21 @@ def _st4(pair: str = "sber") -> St4Session:
     return ST4S[pair]
 
 
+from .st5 import data_feed as feed5   # noqa: E402  st5 — VWAP-reversion одиночного инструмента
+from .st5.backtest import run_backtest as run_backtest5  # noqa: E402
+from .st5.backtest import vwap_frame_for_chart  # noqa: E402
+from .st5.service import ST5_INSTRUMENTS, St5Session   # noqa: E402
+
+# независимая сессия на каждый инструмент st5 (?inst=, см. ST5_INSTRUMENTS)
+ST5S: dict[str, St5Session] = {i: St5Session(i) for i in ST5_INSTRUMENTS}
+
+
+def _st5(inst: str = "sber") -> St5Session:
+    if inst not in ST5S:
+        raise HTTPException(400, "inst: " + " | ".join(ST5S))
+    return ST5S[inst]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     for st in SLOTS:
@@ -362,6 +377,10 @@ async def lifespan(app: FastAPI):
         s4.load_session()
         if s4.state.pop("resume_live", False):
             asyncio.create_task(_st4_autoresume(s4))   # автостарт: live шёл до рестарта
+    for s5 in ST5S.values():
+        s5.load_session()
+        if s5.state.pop("resume_live", False):
+            asyncio.create_task(_st5_autoresume(s5))
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())   # авто-бэктест раз в ~2.5 дня
     yield
     _auto_bt_task.cancel()
@@ -373,6 +392,10 @@ async def lifespan(app: FastAPI):
         s4.save_session()
         s4.state["live"] = False
         s4.state["player"] = False
+    for s5 in ST5S.values():
+        s5.save_session()
+        s5.state["live"] = False
+        s5.state["player"] = False
 
 
 app = FastAPI(title="pairsignal", version="0.1", lifespan=lifespan)
@@ -1438,6 +1461,301 @@ async def st4_tests():
         try:
             p = subprocess.run(
                 [sys.executable, "-m", "pytest", "tests/test_st4.py",
+                 "--no-header", "-p", "no:cacheprovider"],
+                cwd=str(_BASE), capture_output=True, text=True, timeout=180)
+            out = p.stdout + p.stderr
+            passed = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
+            failed = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
+            return {"passed": passed, "failed": failed, "ok": failed == 0 and passed > 0,
+                    "tail": out.strip().splitlines()[-1:] if out else []}
+        except Exception as e:  # noqa: BLE001
+            return {"passed": 0, "failed": 0, "ok": False, "error": str(e)}
+
+    return await asyncio.to_thread(_run)
+
+
+# ============================================================================
+# st5 — VWAP-reversion на одиночном инструменте (FORTS, MOEX ISS). Один фьючерс,
+# отклонение цены от внутридневного VWAP. Paper-only (Phase 1). Сессия на инструмент.
+# ============================================================================
+
+
+@app.get("/st5/instruments")
+def st5_instruments():
+    """Список инструментов — фронт строит переключатель динамически."""
+    return {"instruments": [{"id": iid, "asset": a, "label": lbl}
+                            for iid, (a, lbl) in ST5_INSTRUMENTS.items()]}
+
+
+@app.get("/st5/state")
+def st5_state(inst: str = "sber"):
+    return _st5(inst).snapshot(_server_started)
+
+
+@app.get("/st5/config")
+def st5_config(inst: str = "sber"):
+    return _st5(inst).cfg.model_dump()
+
+
+@app.post("/st5/config")
+async def st5_set_config(payload: dict, inst: str = "sber"):
+    """Обновить параметры стратегии/риска и перезапустить активный поток."""
+    ST5 = _st5(inst)
+    s = ST5.cfg.strategy
+    r = ST5.cfg.risk
+    e = ST5.cfg.execution
+
+    def _num(key, lo, hi, cur):
+        if key not in payload or payload[key] is None:
+            return cur
+        try:
+            v = float(payload[key])
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key}: не число")
+        if not (lo <= v <= hi):
+            raise HTTPException(400, f"{key}: вне диапазона [{lo}, {hi}]")
+        return v
+
+    s.band_sigma = _num("band_sigma", 0.5, 5.0, s.band_sigma)
+    s.stop_sigma = _num("stop_sigma", 0.0, 10.0, s.stop_sigma)
+    s.take_profit_sigma = _num("take_profit_sigma", 0.0, 5.0, s.take_profit_sigma)
+    s.min_bars_in_day = int(_num("min_bars_in_day", 2, 100, s.min_bars_in_day))
+    s.max_bars_in_trade = int(_num("max_bars_in_trade", 0, 100000, s.max_bars_in_trade))
+    s.pending_ttl_bars = int(_num("pending_ttl_bars", 1, 100, s.pending_ttl_bars))
+    s.volume_filter_mult = _num("volume_filter_mult", 0.0, 10.0, s.volume_filter_mult)
+    s.max_data_lag_min = _num("max_data_lag_min", 0.0, 1440.0, s.max_data_lag_min)
+    if "entry_trigger" in payload:
+        if payload["entry_trigger"] not in ("Breakout", "ReEntry"):
+            raise HTTPException(400, "entry_trigger: Breakout | ReEntry")
+        s.entry_trigger = payload["entry_trigger"]
+    if "flat_at_session_end" in payload:
+        s.flat_at_session_end = bool(payload["flat_at_session_end"])
+    if "interval_min" in payload:
+        iv = int(payload["interval_min"])
+        if iv not in (1, 10, 60):
+            raise HTTPException(400, "interval_min: 1 | 10 | 60 (ISS не отдаёт 5m)")
+        s.candle_interval_minutes = iv
+    r.max_daily_loss_rub = _num("max_daily_loss_rub", 0, 1e9, r.max_daily_loss_rub)
+    e.quantity_lots = int(_num("quantity_lots", 1, 1000, e.quantity_lots))
+    if "auto_approve" in payload:
+        ST5.cfg.auto_approve = bool(payload["auto_approve"])
+
+    was_live, was_player = ST5.state["live"], ST5.state["player"]
+    ST5.state["live"] = ST5.state["player"] = False
+    if was_live:
+        ST5.state["live"] = True
+        ST5.log_event("info", "параметры применены — перезапуск live в фоне")
+
+        async def _boot():
+            await asyncio.to_thread(ST5.reset_engine, True)
+            if ST5.state["live"]:
+                await ST5.run_live()
+
+        asyncio.create_task(_boot())
+    elif was_player:
+        ST5.reset_engine(real=False)
+        ST5.state["player"] = True
+        ST5.player_df = feed5.generate_synthetic(
+            n=1500, interval_min=ST5.cfg.strategy.candle_interval_minutes)
+        ST5.player_idx = 0
+        asyncio.create_task(ST5.run_player())
+    else:
+        ST5.reset_engine(real=(ST5.state["data_source"] == "live"))
+    return {"ok": True, "config": ST5.cfg.model_dump(), "was_live": was_live,
+            "was_player": was_player, "restarted": was_live or was_player}
+
+
+async def _st5_autoresume(ST5: St5Session):
+    """Автостарт live после рестарта сервера (paper — продолжение сессии без сброса)."""
+    ST5.state["player"] = False
+    ST5.state["data_source"] = "live"
+    ST5.state["live"] = True
+    ST5.log_event("info", "автовозобновление live после рестарта сервера")
+    await ST5.run_live()
+
+
+@app.post("/st5/control/start")
+async def st5_start(inst: str = "sber"):
+    ST5 = _st5(inst)
+    if ST5.state["live"]:
+        return {"ok": True, "already": True}
+    ST5.state["player"] = False
+    ST5.state["data_source"] = "live"
+    ST5.state["live"] = True
+    ST5.state["paused_by_user"] = False
+    ST5.log_event("info", "запуск live… (резолв серии в фоне)")
+
+    async def _boot():
+        await asyncio.to_thread(ST5.reset_engine, True)
+        if ST5.state["live"]:
+            await ST5.run_live()
+
+    asyncio.create_task(_boot())
+    return {"ok": True, "mode": "live", "starting": True}
+
+
+@app.post("/st5/control/stop")
+def st5_stop(inst: str = "sber"):
+    ST5 = _st5(inst)
+    ST5.state["live"] = False
+    ST5.state["paused_by_user"] = True
+    ST5.save_session()
+    return {"ok": True}
+
+
+@app.post("/st5/player/start")
+async def st5_player_start(limit: int = 1500, inst: str = "sber"):
+    ST5 = _st5(inst)
+    if ST5.state["player"]:
+        return {"ok": True, "already": True}
+    ST5.state["live"] = False
+    ST5.state["paused_by_user"] = False
+    ST5.state["data_source"] = "synthetic"
+    resuming = ST5.player_df is not None and ST5.player_idx < len(ST5.player_df)
+    if not resuming:
+        ST5.reset_engine(real=False)
+        iv = ST5.cfg.strategy.candle_interval_minutes
+        ST5.player_df = feed5.generate_synthetic(n=limit, interval_min=iv)
+        ST5.player_idx = 0
+    ST5.state["player"] = True
+    ST5.save_session()
+    asyncio.create_task(ST5.run_player())
+    return {"ok": True, "resumed": resuming}
+
+
+@app.post("/st5/player/stop")
+def st5_player_stop(inst: str = "sber"):
+    ST5 = _st5(inst)
+    ST5.state["player"] = False
+    ST5.state["paused_by_user"] = True
+    return {"ok": True}
+
+
+@app.post("/st5/control/flat-all")
+def st5_flat_all(payload: dict | None = None, inst: str = "sber"):
+    ST5 = _st5(inst)
+    if not payload or not payload.get("confirm"):
+        raise HTTPException(400, "нужно подтверждение: {\"confirm\": true}")
+    trade = ST5.engine.flat_all("flat_all")
+    ST5.save_session()
+    return {"ok": True, "closed": trade is not None,
+            "net_pnl_rub": round(trade.net_pnl_rub, 0) if trade else None}
+
+
+@app.post("/st5/control/trading")
+def st5_trading(on: bool = True, inst: str = "sber"):
+    ST5 = _st5(inst)
+    ST5.cfg.risk.trading_enabled = on
+    return {"ok": True, "trading_enabled": on}
+
+
+@app.post("/st5/control/resume")
+def st5_resume(inst: str = "sber"):
+    ST5 = _st5(inst)
+    ST5.engine.risk.resume()
+    from .st5.models import BotState as _BS
+    if ST5.engine.state == _BS.HALTED:
+        ST5.engine.state = _BS.FLAT
+    return {"ok": True, "halted": ST5.engine.risk.halted}
+
+
+@app.post("/st5/approve")
+def st5_approve(inst: str = "sber"):
+    ST5 = _st5(inst)
+    if ST5.engine._pending is None:
+        raise HTTPException(400, "нет ожидающей рекомендации")
+    ST5.engine.approve()
+    ST5.save_session()
+    return {"ok": True}
+
+
+@app.post("/st5/reject")
+def st5_reject(inst: str = "sber"):
+    ST5 = _st5(inst)
+    ST5.engine.reject()
+    return {"ok": True}
+
+
+@app.post("/st5/auto")
+def st5_auto(on: bool = True, inst: str = "sber"):
+    ST5 = _st5(inst)
+    ST5.cfg.auto_approve = on
+    if on and ST5.engine._pending is not None:
+        ST5.engine.approve()
+        ST5.save_session()
+    return {"ok": True, "auto_approve": on}
+
+
+@app.post("/st5/reset")
+def st5_reset(inst: str = "sber"):
+    ST5 = _st5(inst)
+    ST5.reset_engine(real=(ST5.state["data_source"] == "live"))
+    return {"ok": True}
+
+
+@app.get("/st5/trades")
+def st5_trades(inst: str = "sber"):
+    ST5 = _st5(inst)
+    return {"trades": [ST5._trade_json(t) for t in ST5.engine.trades]}
+
+
+@app.get("/st5/backtest")
+async def st5_backtest(days: int = 30, band_sigma: float | None = None, inst: str = "sber"):
+    """Бэктест VWAP-reversion на истории MOEX ISS за период."""
+    ST5 = _st5(inst)
+
+    def _run() -> dict:
+        try:
+            spec = feed5.resolve_leg(ST5.cfg)
+        except Exception as ex:  # noqa: BLE001
+            return {"error": f"не удалось определить серию: {ex}"}
+        since = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        since = since.fromtimestamp(since.timestamp() - days * 86400, tz=_tz.utc)
+        try:
+            df = feed5.read_ohlcv_moex_range(ST5.cfg, since, spec.code)
+        except Exception as ex:  # noqa: BLE001
+            return {"error": f"не удалось получить историю: {ex}"}
+        if len(df) < 50:
+            return {"error": f"мало данных: {len(df)} баров"}
+        from .st5.config import St5Config as _Cfg
+        bt_cfg = _Cfg(**ST5.cfg.model_dump())
+        if band_sigma is not None:
+            bt_cfg.strategy.band_sigma = band_sigma
+        res = run_backtest5(df, bt_cfg, spec)
+        res["bands"] = vwap_frame_for_chart(df, bt_cfg)[-400:]
+        res["leg"] = {"code": spec.code, "expiry": spec.expiry}
+        from .st5.service import bt_history_append as _app
+        entry = {
+            "date": _dt.now(_MSK).strftime("%Y-%m-%d %H:%M"),
+            "days": days,
+            "band_sigma": band_sigma if band_sigma is not None else ST5.cfg.strategy.band_sigma,
+            "bars": res["bars"], "trades": res["trades"], "win_rate_pct": res["win_rate_pct"],
+            "net_pnl_rub": res["net_pnl_rub"], "return_pct": res["return_pct"],
+            "max_drawdown_pct": res["max_drawdown_pct"], "stops": res["stops"],
+        }
+        res["history"] = _app(entry, inst=ST5.inst)
+        return res
+
+    return _clean(await asyncio.to_thread(_run))
+
+
+@app.get("/st5/backtest_history")
+def st5_backtest_history(inst: str = "sber"):
+    from .st5.service import bt_history_load as _load
+    return {"history": _load(_st5(inst).inst)}
+
+
+@app.get("/st5/tests")
+async def st5_tests():
+    """Статус юнит-тестов st5."""
+    import re
+    import subprocess
+    import sys
+
+    def _run() -> dict:
+        try:
+            p = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests/test_st5.py",
                  "--no-header", "-p", "no:cacheprovider"],
                 cwd=str(_BASE), capture_output=True, text=True, timeout=180)
             out = p.stdout + p.stderr

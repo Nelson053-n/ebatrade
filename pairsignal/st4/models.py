@@ -64,6 +64,7 @@ class SpreadBar:
     close_ord: float           # Close(SBRF)
     close_pref: float          # Close(SBPR)
     spread: float              # close_pref − close_ord
+    volume: float = 0.0        # сумма объёмов обеих ног (для объёмного фильтра входа)
 
 
 @dataclass(slots=True)
