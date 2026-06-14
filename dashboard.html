@@ -1515,8 +1515,8 @@ function fmtDur(sec){
 }
 function tickSession(){
   const el=$('pill-session');
-  // на вкладке st4 показываем её сессию (свой снимок _s4snap), иначе — слотовый snap
-  const src = SLOT===4 ? _s4snap : snap;
+  // на спец-вкладках показываем их сессию (свой снимок), иначе — слотовый snap
+  const src = SLOT===4 ? _s4snap : SLOT===5 ? _s5snap : snap;
   if(!src || !src.session_started){ el.textContent='сессия: —'; return; }
   const nowC=Date.now()/1000 + _clockSkew;
   el.textContent='сессия: '+fmtDur(nowC - src.session_started);
@@ -2329,6 +2329,23 @@ function s5Render(s){
     $('s5-title-sub').textContent=`${s.inst_label||''}, FORTS · возврат к внутридневному VWAP`;
   }
   $('s5-leg').textContent = 'серия: '+(s.leg && s.leg.code || '—')+(s.leg&&s.leg.expiry?` (эксп. ${s.leg.expiry.slice(5)})`:'');
+  // --- глобальная шапка/футер под st5 (иначе остаются плашки st1/st2/st4) ---
+  const hp=$('hdr-pair'); if(hp && s.asset) hp.innerHTML=s.asset+' <span style="opacity:.5">·VWAP</span>';
+  if($('hdr-tag')) $('hdr-tag').textContent='phase 1 · paper';
+  if($('hdr-data')) $('hdr-data').textContent='данные: '+(s.data_provider||'—');
+  if($('hdr-exch')) $('hdr-exch').textContent='виртуальная биржа';
+  const hf5=$('hdr-flow');
+  if(hf5){ const on=s.live||s.player;
+    hf5.querySelector('.dot').style.background=on?'':'var(--ink-faint)';
+    hf5.querySelector('.dot').style.boxShadow=on?'':'none';
+    hf5.childNodes[1].nodeValue=on?' поток активен':' остановлено'; }
+  const note5=$('page-note');
+  if(note5) note5.innerHTML='<b>st5 — VWAP-reversion на одиночном фьючерсе ('+(s.asset||'')+', FORTS).</b> '
+    +'Режим <b>paper</b>: реальные ордера не выставляются. Цена возвращается к внутридневному VWAP '
+    +'(сброс каждый день), вход по пробою коридора ±k·σ, выход к VWAP / тейк / стоп, '
+    +'обязательное закрытие к концу сессии (нет овернайт-риска). Данные — синтетика (демо) или '
+    +'реальные котировки MOEX ISS по закрытым свечам (no repaint). <b>Эдж слабый — форвард-тест гипотезы.</b>';
+  const bl5=$('s5-btn-live'); if(bl5 && !s.live) bl5.textContent='▶ live (ISS)';
   // статус
   let dot='var(--ink-faint)', txt=s.wait_reason||'—';
   if(s.halted){ dot='var(--loss)'; }
