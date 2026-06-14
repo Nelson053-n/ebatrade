@@ -58,6 +58,9 @@ PAIRS = [
     ("BNB/USDT:USDT", "SOL/USDT:USDT"),
     ("LTC/USDT:USDT", "BCH/USDT:USDT"),
     ("XRP/USDT:USDT", "ADA/USDT:USDT"),
+    # отобраны по коинтеграции (pairs_coint.py, OOS 2026-03..06): лучшие 2 из 8 пар,
+    # прибыльные out-of-sample. ENA/WLD — win 86%/99 сделок; BTC/ETH (уже выше) — p<0.001.
+    ("ENA/USDT:USDT", "WLD/USDT:USDT"),
 ]
 
 # поддерживаемые таймфреймы MEXC → длительность в минутах
@@ -606,6 +609,11 @@ def set_config(payload: dict, slot: int = 1):
         s.timeframe = tf
     if sa is not None:
         s.symbol_a, s.symbol_b = sa, sb
+    if "spread_mode" in payload:
+        sm = payload["spread_mode"]
+        if sm not in ("log", "ratio", "cross_pct"):
+            raise HTTPException(400, "spread_mode: log | ratio | cross_pct")
+        s.spread_mode = sm
     if "auto_approve" in payload:
         st.cfg.auto_approve = bool(payload["auto_approve"])
 
