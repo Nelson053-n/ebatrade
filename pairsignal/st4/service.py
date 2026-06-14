@@ -30,8 +30,10 @@ BT_HISTORY_LEN = 60        # сколько прогонов бэктеста х
 # ключ — идентификатор в API (?pair=), значение — (ASSETCODE обычки, префа, ярлык)
 ST4_PAIRS: dict[str, tuple[str, str, str]] = {
     "sber": ("SBRF", "SBPR", "Сбербанк"),
-    "tatn": ("TATN", "TATP", "Татнефть"),
     "sngr": ("SNGR", "SNGP", "Сургутнефтегаз"),
+    # Татнефть (TATN/TATP) убрана: обычка и преф-фьючерсы имеют разный лот (100 vs 10),
+    # цены контрактов различаются в ~10× — спред несопоставим; преф неликвиден на 10m,
+    # ноги почти не синхронизируются (inner-join ~6 баров из 50) — BB(200) не набирается.
 }
 
 
@@ -566,7 +568,7 @@ class St4Session:
             "warmup_done": bool(b and b.is_ready), # прогрет ли индикатор
             "trade_start_ts": self.state.get("trade_start_ts"),  # граница backfill→live торговля
             "pair": self.pair,                     # идентификатор пары (?pair=)
-            "pair_label": self.pair_label,         # «Сбербанк» / «Татнефть»
+            "pair_label": self.pair_label,         # «Сбербанк» / «Сургутнефтегаз»
             "asset_ord": self.cfg.instruments.asset_ordinary,
             "asset_pref": self.cfg.instruments.asset_preferred,
             "strategy_name": "Спред %s/%s · Bollinger(%d, %gσ)" % (

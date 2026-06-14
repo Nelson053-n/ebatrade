@@ -341,7 +341,7 @@ from .st4 import data_feed as feed   # noqa: E402  st4 — FSM-арбитраж 
 from .st4.backtest import band_frame_for_chart, run_backtest  # noqa: E402
 from .st4.service import ST4_PAIRS, St4Session   # noqa: E402
 
-# независимая форвард-тест сессия на каждую пару обычка/преф (?pair=sber|tatn)
+# независимая форвард-тест сессия на каждую пару обычка/преф (?pair=, см. ST4_PAIRS)
 ST4S: dict[str, St4Session] = {p: St4Session(p) for p in ST4_PAIRS}
 ST4 = ST4S["sber"]                    # пара по умолчанию (совместимость)
 
