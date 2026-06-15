@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -205,10 +206,23 @@ class St4Session:
         return True
 
     def log_event(self, kind: str, message: str) -> None:
-        """Записать действие в кольцевой журнал бота (+ last_event для совместимости)."""
-        self.events.append({"ts": time.time(), "kind": kind, "message": message})
-        if len(self.events) > EVENTS_LEN:
-            del self.events[0]
+        """Записать действие в кольцевой журнал бота (+ last_event для совместимости).
+
+        Дедуп повторов: если последнее событие того же типа и того же «шаблона» (текст без
+        цифр — напр. однотипные warn «нет свежих свечей N мин»), не плодим строки, а обновляем
+        существующую (свежий ts/текст + счётчик count). Так журнал не заливается поллером.
+        """
+        sig = (kind, re.sub(r"\d+", "#", message))
+        if self.events and self.events[-1].get("_sig") == sig:
+            last = self.events[-1]
+            last["ts"] = time.time()
+            last["message"] = message
+            last["count"] = last.get("count", 1) + 1
+        else:
+            self.events.append({"ts": time.time(), "kind": kind, "message": message,
+                                "_sig": sig, "count": 1})
+            if len(self.events) > EVENTS_LEN:
+                del self.events[0]
         self.state["last_event"] = message
 
     def push_history(self, ts: int) -> None:
@@ -589,7 +603,8 @@ class St4Session:
             "history": self.history,
             "trades": [self._trade_json(t) for t in eng.trades],
             "last_event": self.state["last_event"],
-            "events": self.events[-20:],           # журнал последних действий
+            "events": [{k: v for k, v in e.items() if k != "_sig"}
+                       for e in self.events[-20:]],  # журнал (без служебного _sig)
             "wait_reason": wait,                   # человекочитаемо: что бот делает/ждёт
             "cur_z": round(cur_z, 2) if cur_z is not None else None,
             "rollover": rollover,                  # окно тишины/роллировера перед экспирацией

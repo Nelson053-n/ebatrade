@@ -770,3 +770,21 @@ def test_data_fresh_predicate():
     # выключение гейта (max_data_lag_min=0) → старый бар снова «свежий»
     cfg.strategy.max_data_lag_min = 0.0
     assert eng._data_fresh(stale)
+
+
+def test_log_event_dedups_repeated_warns():
+    """Дедуп журнала: однотипные warn (текст без цифр совпадает) сворачиваются в одну запись
+    со счётчиком count; другой тип/шаблон → новая строка; служебное _sig не утекает в snapshot."""
+    from pairsignal.st4.service import St4Session
+    s = St4Session("sber")
+    s.events = []
+    s.log_event("warn", "нет свежих свечей ISS 139 мин — ждём")
+    s.log_event("warn", "нет свежих свечей ISS 140 мин — ждём")
+    s.log_event("warn", "нет свежих свечей ISS 141 мин — ждём")
+    assert len(s.events) == 1 and s.events[-1]["count"] == 3
+    assert "141" in s.events[-1]["message"]   # хранит свежий текст
+    s.log_event("info", "роллировер: торгуем SRU6/SPU6")
+    s.log_event("warn", "нет свежих свечей ISS 142 мин — ждём")
+    assert len(s.events) == 3                 # info разорвал серию warn
+    s.state["live"] = True
+    assert all("_sig" not in e for e in s.snapshot(0.0)["events"])

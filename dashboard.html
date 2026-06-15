@@ -2040,7 +2040,8 @@ function s4Render(s){
     const kindColor={position:'var(--signal)',exit:'var(--ink)',halt:'var(--loss)',warn:'var(--warn)',info:'var(--ink-dim)'};
     evbox.innerHTML = s.events.slice().reverse().map(e=>{
       const m=s4msk(e.ts*1000), hh=m.hh, mm=m.mm, ss=m.ss;   // журнал — по МСК
-      return `<div style="padding:2px 0"><span style="color:var(--ink-faint)">${hh}:${mm}:${ss}</span> <span style="color:${kindColor[e.kind]||'var(--ink-dim)'}">${e.message}</span></div>`;
+      const rep = e.count>1 ? ` <span style="color:var(--ink-faint)">×${e.count}</span>` : '';
+      return `<div style="padding:2px 0"><span style="color:var(--ink-faint)">${hh}:${mm}:${ss}</span> <span style="color:${kindColor[e.kind]||'var(--ink-dim)'}">${e.message}</span>${rep}</div>`;
     }).join('');
   } else evbox.innerHTML='<div class="empty" style="text-align:left">журнал пуст</div>';
   const sm=s.summary;
