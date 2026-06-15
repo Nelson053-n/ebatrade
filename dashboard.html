@@ -1957,7 +1957,11 @@ function s4Render(s){
     const clamp=Math.max(-3,Math.min(3,z)); $('s4-ptr').style.left=((clamp+3)/6*100)+'%';
   } else { $('s4-ro-z').textContent='—'; }
   $('s4-chart-sub').textContent = `${s.legs.pref} − ${s.legs.ord} · BB(${s.sma_period}, ${s.sigma_mult}σ)`;
-  $('s4-legs').textContent = `${s.legs.ord} / ${s.legs.pref}` + (s.legs.ord_expiry? ' · эксп '+s.legs.ord_expiry : '');
+  const _d2e = s.rollover ? s.rollover.days_to_expiry : null;
+  const _expTail = s.legs.ord_expiry
+    ? ' · эксп '+s.legs.ord_expiry + (_d2e!=null ? ` (${_d2e} дн${s.rollover.quiet_mode?', тишина':''})` : '')
+    : '';
+  $('s4-legs').textContent = `${s.legs.ord} / ${s.legs.pref}` + _expTail;
   // --- шапка для st4 (переопределяем st1/st2-плашки, чтобы не вводить в заблуждение) ---
   const hp=$('hdr-pair'); if(hp) hp.innerHTML='SBRF <span>÷</span> SBPR';
   const sandboxMode = s.connector_mode==='tbank_sandbox';
@@ -2014,6 +2018,7 @@ function s4Render(s){
   else if(inPos){ dotColor=s.position.state==='short_spread'?'var(--short)':'var(--signal)'; }
   else if(!flowing){ dotColor='var(--ink-faint)'; }
   else if(!s.warmup_done){ dotColor='var(--warn)'; }
+  else if(s.rollover && s.rollover.quiet_mode){ dotColor='var(--warn)'; }  // тишина перед экспирацией
   else if(s.data_source==='live' && s.data_lag_min!=null && s.data_lag_min>25){ dotColor='var(--warn)'; }
   else { dotColor='var(--signal)'; }   // прогрет, торгует/ждёт сигнал
   $('s4-status-dot').style.background=dotColor;

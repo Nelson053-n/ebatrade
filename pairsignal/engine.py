@@ -77,6 +77,11 @@ class Engine:
         if not self.pending or self.exch.position is not None:
             return
         rec = self.pending
+        # защита от устаревшей рекомендации: если за время до approve z ушёл за stop_z,
+        # вход = моментальный стоп. Отклоняем (та же логика, что фильтр в strategy.py).
+        if rec.z is not None and abs(rec.z) >= self.cfg.strategy.stop_z:
+            self.pending = None
+            return
         notional = self.exch.balance * (self.cfg.paper.risk_pct / 100.0)
         # σ спреда на входе: (upper − mid)/bb_k — фиксируем вместе с β и mid,
         # чтобы z открытой позиции считался по неизменной базе

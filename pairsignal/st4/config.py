@@ -21,7 +21,10 @@ class InstrumentsConfig(BaseModel):
     leg_preferred_code: str = ""          # напр. SPM6
     auto_rollover: bool = True
     rollover_days_before_expiry: int = 3  # за сколько дней до экспирации роллить/не входить
-    rollover_no_new_entry_days_before: int = 5
+    # окно «тишины» перед экспирацией: новые входы стопаем за столько дней. Держим = roll-окну,
+    # чтобы не было «мёртвого коридора» (входов нет, но и роллировера ещё нет): как только
+    # d2e < 3 — позиции закрываются и серия роллится на следующую.
+    rollover_no_new_entry_days_before: int = 3
 
 
 class StrategyConfig(BaseModel):

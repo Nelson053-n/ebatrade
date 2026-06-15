@@ -272,11 +272,14 @@ class St4Session:
         except Exception:  # noqa: BLE001
             return False
         try:
+            # параметры-политики (не состояние сессии) — всегда из актуального кода,
+            # не из старого файла: иначе обновлённые дефолты роллировера не применятся
+            policy_skip = {"rollover_no_new_entry_days_before", "rollover_days_before_expiry"}
             for k, v in (data.get("config") or {}).items():
                 if hasattr(self.cfg, k) and isinstance(v, dict):
                     sub = getattr(self.cfg, k)
                     for kk, vv in v.items():
-                        if hasattr(sub, kk):
+                        if hasattr(sub, kk) and kk not in policy_skip:
                             setattr(sub, kk, vv)
             so, sp = data.get("spec_ord"), data.get("spec_pref")
             if so:
@@ -507,6 +510,21 @@ class St4Session:
         lag_min = round((time.time() - last_bar_ts / 1000) / 60) if last_bar_ts else None
         b = eng.last_band
         cur_z = ((b.spread - b.sma) / b.sigma) if (b and b.is_ready and b.sigma > 0) else None
+        # окно роллировера: дней до экспирации и «режим тишины» (новые входы стопнуты)
+        d2e = eng.days_to_expiry(int(time.time() * 1000))
+        no_entry = self.cfg.instruments.rollover_no_new_entry_days_before
+        in_quiet = d2e is not None and d2e < no_entry   # окно тишины перед экспирацией
+        # где БЫЛ БЫ вход, если бы не тишина: |z| за порогом → сторона сигнала
+        would_signal = None
+        if cur_z is not None and abs(cur_z) >= self.cfg.strategy.sigma_multiplier:
+            would_signal = "шорт спреда" if cur_z > 0 else "лонг спреда"
+        rollover = {
+            "days_to_expiry": d2e,
+            "quiet_mode": in_quiet,                 # True → новые входы заморожены перед экспирацией
+            "no_entry_days": no_entry,
+            "roll_days": self.cfg.instruments.rollover_days_before_expiry,
+            "would_enter": would_signal,            # сигнал, который пропускается из-за тишины (или None)
+        }
         # человекочитаемая причина простоя
         if eng.risk.halted:
             wait = "HALTED — нужен ручной разбор"
@@ -518,6 +536,11 @@ class St4Session:
             need = self.cfg.strategy.sma_period
             have = len(self.history)
             wait = f"прогрев индикатора BB({need}): {have}/{need} баров"
+        elif in_quiet:
+            tail = (f"; был бы сигнал на {would_signal} (z={cur_z:+.2f}) — пропускаем"
+                    if would_signal else "")
+            wait = (f"режим тишины перед экспирацией: до экспирации {d2e} дн "
+                    f"(< {no_entry}) — новых входов нет, ждём роллировер на следующую серию{tail}")
         elif self.state["data_source"] == "live" and lag_min is not None and lag_min > 25 \
                 and not self.state.get("sandbox_active"):
             # только для ISS (задержка свечей). T-Bank real-time — этот гейт не применяем.
@@ -568,6 +591,8 @@ class St4Session:
             "last_event": self.state["last_event"],
             "events": self.events[-20:],           # журнал последних действий
             "wait_reason": wait,                   # человекочитаемо: что бот делает/ждёт
+            "cur_z": round(cur_z, 2) if cur_z is not None else None,
+            "rollover": rollover,                  # окно тишины/роллировера перед экспирацией
             "data_lag_min": lag_min,               # возраст последнего бара, мин
             "last_bar_ts": last_bar_ts or None,
             "warmup_done": bool(b and b.is_ready), # прогрет ли индикатор
