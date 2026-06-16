@@ -23,7 +23,7 @@ from .config import AppConfig, PaperConfig, StrategyConfig
 from .data_feed import read_ohlcv_cross_range
 from .main import run_backtest
 
-EXCHANGE_A = "gateio"
+EXCHANGE_A = "gate"   # ccxt ≥4.5.58 убрал алиас "gateio", оставив канонический "gate"
 EXCHANGE_B = "mexc"
 START_BALANCE = 1000.0
 

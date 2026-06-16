@@ -26,7 +26,7 @@ class StrategyConfig(BaseModel):
     band_mode: Literal["pct", "vol"] = "vol"
     band_pct: float = 0.03               # полуширина для band_mode="pct" (доля от цены)
     sma_period: int = 200                # окно SMA и σ спреда (отдельно от bb_period)
-    exchange_a: str = "gateio"           # биржа ноги A (для read_ohlcv_cross)
+    exchange_a: str = "gate"             # биржа ноги A (ccxt ≥4.5.58: "gate", не "gateio")
     exchange_b: str = "mexc"             # биржа ноги B (BitMEX/OKX недоступны с сервера)
     symbol_cross: str = "SUI/USDT:USDT"  # единый символ на обеих биржах
 
