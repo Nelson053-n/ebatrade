@@ -29,9 +29,11 @@ BT_HISTORY_LEN = 60        # сколько прогонов бэктеста х
 
 # пары обычка/преф, доступные как независимые форвард-тест сессии st4.
 # ключ — идентификатор в API (?pair=), значение — (ASSETCODE обычки, префа, ярлык)
-ST4_PAIRS: dict[str, tuple[str, str, str]] = {
-    "sber": ("SBRF", "SBPR", "Сбербанк"),
-    "sngr": ("SNGR", "SNGP", "Сургутнефтегаз"),
+# (актив_обычка, актив_преф, подпись[, sma_period]). sma_period опционален — дефолт 200;
+# для менее ликвидных пар снижаем, иначе BB не набирается (мало 10m-баров на серию).
+ST4_PAIRS: dict[str, tuple] = {
+    "sber": ("SBRF", "SBPR", "Сбербанк"),                  # ликвидная — BB(200)
+    "sngr": ("SNGR", "SNGP", "Сургутнефтегаз", 100),       # сентябрьская серия даёт ~138 баров → BB(100)
     # Татнефть (TATN/TATP) убрана: обычка и преф-фьючерсы имеют разный лот (100 vs 10),
     # цены контрактов различаются в ~10× — спред несопоставим; преф неликвиден на 10m,
     # ноги почти не синхронизируются (inner-join ~6 баров из 50) — BB(200) не набирается.
@@ -92,13 +94,17 @@ class St4Session:
         if pair not in ST4_PAIRS:
             raise ValueError(f"неизвестная пара st4: {pair}")
         self.pair = pair
-        asset_ord, asset_pref, self.pair_label = ST4_PAIRS[pair]
+        spec = ST4_PAIRS[pair]
+        asset_ord, asset_pref, self.pair_label = spec[0], spec[1], spec[2]
+        sma_period = spec[3] if len(spec) > 3 else None   # опц. per-pair BB-период (малоликвидные)
         # sber пишет в исторический session_state_4.json (совместимость со старыми сессиями)
         suffix = "" if pair == "sber" else f"_{pair}"
         self._session_file = _BASE / f"session_state_4{suffix}.json"
         self.cfg = St4Config()
         self.cfg.instruments.asset_ordinary = asset_ord
         self.cfg.instruments.asset_preferred = asset_pref
+        if sma_period is not None:
+            self.cfg.strategy.sma_period = sma_period
         self.spec_ord: InstrumentSpec = feed.synthetic_spec(Role.ORDINARY)
         self.spec_pref: InstrumentSpec = feed.synthetic_spec(Role.PREFERRED)
         self.engine = TradingEngine(self.cfg, self.spec_ord, self.spec_pref)
@@ -288,7 +294,9 @@ class St4Session:
         try:
             # параметры-политики (не состояние сессии) — всегда из актуального кода,
             # не из старого файла: иначе обновлённые дефолты роллировера не применятся
-            policy_skip = {"rollover_no_new_entry_days_before", "rollover_days_before_expiry"}
+            # sma_period — per-pair политика из ST4_PAIRS (малоликвидные пары), не из файла
+            policy_skip = {"rollover_no_new_entry_days_before", "rollover_days_before_expiry",
+                           "sma_period"}
             for k, v in (data.get("config") or {}).items():
                 if hasattr(self.cfg, k) and isinstance(v, dict):
                     sub = getattr(self.cfg, k)
