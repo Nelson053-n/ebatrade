@@ -262,12 +262,12 @@ tr:hover td{background:rgba(255,255,255,.015)}
   <!-- ST3: momentum (cross-sectional) — отдельная панель, скрыта по умолчанию -->
   <div id="st3panel" style="display:none">
     <div class="panel fade" style="margin-bottom:14px">
-      <h2>st3 · Cross-Sectional Momentum <em>тренд-следование, доллар-нейтраль</em></h2>
+      <h2>st3 · Cross-Sectional Momentum <em>long-only + рыночный фильтр</em></h2>
       <div style="font-size:13px;line-height:1.75;color:var(--ink-dim)">
         <p style="margin:0 0 8px"><b style="color:var(--ink)">Идея.</b> В отличие от st1/st2 (mean-reversion — ставка на <i>возврат</i> спреда к среднему), momentum ставит на <i>продолжение</i> относительного тренда. Крипта исторически трендова — это другой класс edge.</p>
-        <p style="margin:0 0 8px"><b style="color:var(--ink)">Механика.</b> Каждые <code>holding</code> часов ранжируем топ-30 ликвидных монет по доходности за прошлые <code>lookback</code> закрытых баров. Лонгуем <code>k</code> лидеров, шортим <code>k</code> аутсайдеров, равный нотионал — портфель доллар-нейтрален (зарабатывает на относительной силе, не на направлении рынка).</p>
-        <p style="margin:0 0 8px"><b style="color:var(--ink)">Честность.</b> Параметры (lookback/holding) подбираются на train-окне по Sharpe, прогон — на следующем невиданном test-окне (walk-forward, no look-ahead). Индикаторы только по закрытым барам (no repaint).</p>
-        <p style="margin:0 0 8px"><b style="color:var(--ink)">Издержки и риск.</b> Учитываются комиссия и проскальзывание на оборот при каждом ребалансе. Главный риск — momentum crash: резкие просадки на развороте тренда (см. maxDD). Стратегия выживает при тейкерных издержках — в отличие от кросс-биржевого арбитража st2.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Механика.</b> Каждые <code>holding</code> часов ранжируем топ-30 ликвидных монет по доходности за прошлые <code>lookback</code> закрытых баров и лонгуем <code>k</code> лидеров равным нотионалом. <b>Только лонг</b> — шорты убраны: бэктест показал, что short-нога теряет на растущей крипте (long +2928% / short −80% за 180д) и раздувает просадку.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Рыночный фильтр.</b> На ребалансе, если равновзвешенный индекс рынка ниже своей <code>SMA(market_ma)</code> — портфель уходит в <b>кэш</b> (медвежий режим). Это срезает главный риск momentum — обвал на развороте: бэктест 180д <code>maxDD −92% → −42%</code>, <code>Sharpe 1.14 → 3.04</code>, <code>ret +8% → +237%</code> (тейкер). ~49% времени в кэше в просадки рынка.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Честность.</b> Стратегия отобрана honest walk-forward OOS (параметры на train, прогон на невиданном test) + проверена по третям периода — в плюс даже когда рынок падал −21%/−15%. Индикаторы только по закрытым барам (no repaint), издержки тейкерные.</p>
         <p style="margin:0;color:var(--ink-faint)"><b>⚠ Paper, без реальных ордеров (Phase 1).</b> Цифры бэктеста/сравнения — по close-ценам без модели стакана, это верхняя граница. Честный показатель — live forward-test ниже, он копится медленно.</p>
       </div>
     </div>
@@ -1648,9 +1648,15 @@ async function momState(){
     $('m-return').textContent=(ret>=0?'+':'')+ret.toFixed(2)+'%';
     $('m-return').style.color = ret>=0?'var(--signal)':'#ff6b6b';
     const m=s.meta||{};
-    $('m-params').textContent=`lookback=${m.lookback} holding=${m.holding} k=${m.k}`;
-    $('m-longs').innerHTML='<b style="color:var(--signal)">ЛОНГ:</b> '+((s.longs||[]).join(', ')||'—');
-    $('m-shorts').innerHTML=' &nbsp; <b style="color:#ff6b6b">ШОРТ:</b> '+((s.shorts||[]).join(', ')||'—');
+    const lo = m.long_short===false || m.market_ma>0;   // новый режим long-only
+    const mm = m.market_ma ? ` market-MA=${m.market_ma}` : '';
+    $('m-params').textContent=`lookback=${m.lookback} holding=${m.holding} k=${m.k} · ${lo?'long-only':'long/short'}${mm}`;
+    const inCash = lo && !(s.longs||[]).length;
+    $('m-longs').innerHTML = inCash
+      ? '<b style="color:var(--warn)">В КЭШЕ</b> <span style="color:var(--ink-faint)">(рынок ниже MA — медвежий режим)</span>'
+      : '<b style="color:var(--signal)">ЛОНГ:</b> '+((s.longs||[]).join(', ')||'—');
+    // строку ШОРТ показываем только в L/S-режиме (в long-only шортов нет)
+    $('m-shorts').innerHTML = lo ? '' : ' &nbsp; <b style="color:#ff6b6b">ШОРТ:</b> '+((s.shorts||[]).join(', ')||'—');
     const rb=s.rebalances||[];
     drawEquity($('mEquity'), [{pts: rb.map(x=>({v:x.equity/(s.start_equity||1000)}))}], MOM_COLORS);
     const tb=$('m-rebals').querySelector('tbody'); tb.innerHTML='';
