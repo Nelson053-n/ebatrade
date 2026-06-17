@@ -1263,6 +1263,30 @@ def st4_trades(pair: str = "sber"):
     return {"trades": [ST4._trade_json(t) for t in ST4.engine.trades]}
 
 
+@app.get("/st4/daily")
+def st4_daily(pair: str = "sber"):
+    """Доходность по дням: дата (МСК), net P&L за день (₽) и число сделок в день.
+
+    Группировка по дню ВЫХОДА сделки (exit_ts) в московском времени — день торгов FORTS.
+    """
+    ST4 = _st4(pair)
+    by_day: dict[str, dict] = {}
+    for t in ST4.engine.trades:
+        d = _dt.fromtimestamp(t.exit_ts / 1000, tz=_MSK).strftime("%Y-%m-%d")
+        e = by_day.setdefault(d, {"date": d, "net_pnl_rub": 0.0, "trades": 0, "wins": 0})
+        e["net_pnl_rub"] += t.net_pnl_rub
+        e["trades"] += 1
+        if t.net_pnl_rub > 0:
+            e["wins"] += 1
+    days = sorted(by_day.values(), key=lambda x: x["date"])
+    cum = 0.0
+    for d in days:
+        cum += d["net_pnl_rub"]
+        d["net_pnl_rub"] = round(d["net_pnl_rub"], 0)
+        d["cum_pnl_rub"] = round(cum, 0)             # накопленный P&L для контекста
+    return _clean({"pair": pair, "days": days})
+
+
 @app.get("/st4/backtest")
 async def st4_backtest(days: int = 90, stop_sigma: float | None = None, pair: str = "sber"):
     """Бэктест на реальной истории MOEX ISS за period (honest: maxDD по equity)."""

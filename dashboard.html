@@ -400,6 +400,13 @@ tr:hover td{background:rgba(255,255,255,.015)}
         </div>
 
         <div class="panel fade" style="margin-top:14px">
+          <h2>Доходность по дням <em id="s4-daily-sub" style="font-style:normal"></em></h2>
+          <div class="jscroll" style="max-height:280px"><table id="s4-daily">
+            <thead><tr><th>дата (МСК)</th><th>доходность ₽</th><th>сделок</th><th>накопл. ₽</th></tr></thead>
+            <tbody></tbody></table></div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
           <h2>Бэктест на истории MOEX ISS</h2>
           <div style="font-size:11px;color:var(--ink-faint);margin-bottom:8px">Прогон стратегии на длинной истории ISS (до месяцев). Глубокая история, но котировки с задержкой.</div>
           <div class="params" style="margin-top:0;gap:10px;margin-bottom:10px">
@@ -1917,6 +1924,33 @@ function s4RenderTrades(trades){
   });
 }
 
+// доходность по дням: агрегируем закрытые сделки по дню ВЫХОДА (МСК) — net P&L и число сделок
+function s4RenderDaily(trades){
+  const tb=$('s4-daily').querySelector('tbody'); tb.innerHTML='';
+  if(!trades||!trades.length){ $('s4-daily-sub').textContent=''; tb.innerHTML='<tr><td colspan="4" class="empty" style="text-align:left">сделок пока нет</td></tr>'; return; }
+  const by={};
+  trades.forEach(t=>{
+    const m=s4msk(t.exit_ts); const d=new Date(t.exit_ts);
+    const tm=new Date(d.getTime()+(d.getTimezoneOffset()+180)*60000);
+    const key=tm.getFullYear()+'-'+String(tm.getMonth()+1).padStart(2,'0')+'-'+String(tm.getDate()).padStart(2,'0');
+    (by[key]=by[key]||{date:key,net:0,n:0}); by[key].net+=t.net_pnl_rub; by[key].n++;
+  });
+  const days=Object.values(by).sort((a,b)=>a.date<b.date?-1:1);
+  let cum=0;
+  $('s4-daily-sub').textContent=days.length+(days.length===1?' день':' дн.');
+  // накопл. считаем в хронологии, рисуем от свежих к старым
+  const cumMap={};
+  days.forEach(x=>{ cum+=x.net; cumMap[x.date]=cum; });
+  days.slice().reverse().forEach(x=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${x.date}</td>`+
+      `<td style="color:${x.net>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s4money(x.net)}</td>`+
+      `<td>${x.n}</td>`+
+      `<td style="color:var(--ink-dim)">${s4money(cumMap[x.date])}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
 // MSK (UTC+3) из unix ms → {hh,mm,ss, minutes_of_day}
 function s4msk(ms){
   const d=new Date(ms); const t=d.getTime()+(d.getTimezoneOffset()+180)*60000; const m=new Date(t);
@@ -2086,6 +2120,7 @@ function s4Render(s){
   window._s4tradeStart = s.trade_start_ts || null;   // линия старта торговли на графике
   s4DrawChart(s.history, s.trades, s.position);
   s4RenderTrades(s.trades);
+  s4RenderDaily(s.trades);
 }
 
 async function s4Poll(){ if(SLOT!==4) return; try{ s4Render(await s4api('/state')); }catch(e){} }
