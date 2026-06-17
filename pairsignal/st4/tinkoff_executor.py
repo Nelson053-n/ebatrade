@@ -48,6 +48,17 @@ class TinkoffSandboxExecutor:
         """uid обеих ног (SBRF, SBPR) для запроса real-time свечей T-Bank."""
         return self.sb._uid(self._inst[Role.ORDINARY]), self.sb._uid(self._inst[Role.PREFERRED])
 
+    def is_tradable(self) -> bool:
+        """Торгуются ли ОБЕ ноги сейчас (для гейта неторгового времени в движке).
+        Обе должны быть доступны — парный ордер атомарен."""
+        try:
+            self._resolve_instruments()
+            uid_o = self.sb._uid(self._inst[Role.ORDINARY])
+            uid_p = self.sb._uid(self._inst[Role.PREFERRED])
+            return self.sb.is_tradable(uid_o) and self.sb.is_tradable(uid_p)
+        except Exception:  # noqa: BLE001  не смогли проверить — не блокируем
+            return True
+
     def _account(self) -> str:
         """Переиспользовать sandbox-счёт (conn.account_id / по имени) или открыть новый."""
         accs = self.sb.list_accounts()

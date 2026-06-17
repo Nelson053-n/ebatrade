@@ -226,6 +226,15 @@ class TradingEngine:
             if crossed or time_stop or sigma_stop or take:
                 reason = ("exit" if crossed else "stop" if sigma_stop
                           else "take" if take else "time_stop")
+                # гейт неторгового времени: реальный (sandbox) выход в клиринг/ночь/выходные
+                # отклоняется биржей (HTTP400 30079). Не пытаемся слать ордер — откладываем
+                # выход до открытия рынка (сигнал сохранится, закроемся на ближайшем баре сессии).
+                ex = getattr(self, "executor", None)
+                if ex is not None and hasattr(ex, "is_tradable") and not ex.is_tradable():
+                    events.append(EngineEvent(bar.ts, "warn",
+                                  f"выход ({reason}) отложен: рынок закрыт (неторговое время)", {}))
+                    self._prev = band
+                    return StepResult(state=self.state, band=band, events=events)
                 trade = self._close_position(bar, reason)
                 events.append(EngineEvent(bar.ts, "exit",
                               f"выход ({reason}): net {trade.net_pnl_rub:+.0f}₽", {}))

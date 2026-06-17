@@ -206,6 +206,21 @@ def last_price(figi: str) -> float:
     return _q_to_float(lp[0]["price"]) if lp else 0.0
 
 
+def is_tradable(instrument_id: str) -> bool:
+    """Доступен ли инструмент для торгов СЕЙЧАС (tradingStatus + флаги ордеров).
+    Чтобы не слать ордер в неторговое время (клиринг/ночь/выходные) → HTTP400 30079."""
+    try:
+        resp = _call(_MARKETDATA, "GetTradingStatus", {"instrumentId": instrument_id})
+        st = resp.get("tradingStatus", "")
+        # допускаем нормальную и dealer-сессии; ордера должны быть разрешены
+        ok_status = st in ("SECURITY_TRADING_STATUS_NORMAL_TRADING",
+                           "SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING")
+        return bool(ok_status and resp.get("marketOrderAvailableFlag", True)
+                    and resp.get("apiTradeAvailableFlag", True))
+    except Exception:  # noqa: BLE001  не смогли узнать статус — не блокируем (как было)
+        return True
+
+
 # ---------------------------------------------------------------- sandbox
 
 def open_account(name: str = "st4-spread-sandbox") -> str:
