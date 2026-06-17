@@ -137,12 +137,22 @@ class St4Session:
         self.spec_ord, self.spec_pref = feed.resolve_legs(self.cfg)
 
     def _restore_engine_position(self) -> None:
-        """Восстановить открытую позицию из session-файла в (только что пересозданный) движок.
-        Нужно для reconciliation: чтобы сверить позицию счёта с тем, что вёл движок до рестарта."""
+        """Восстановить состояние движка из session-файла в (только что пересозданный в
+        reset_engine) движок: ЖУРНАЛ СДЕЛОК, баланс, дневной P&L и открытую позицию.
+
+        Без этого reset_engine при каждом control/start обнулял бы trades/balance (движок
+        создаётся с нуля) — пропадали прошлые сделки и доходность по дням. Позиция нужна и
+        для reconciliation (сверить с sandbox-счётом)."""
         try:
             if not self._session_file.exists():
                 return
             data = json.loads(self._session_file.read_text())
+            # журнал/баланс/день риска — переносим (накопленная история сессии)
+            if "balance_rub" in data:
+                self.engine.balance_rub = data["balance_rub"]
+            self.engine.trades = [self._trade_from_json(t) for t in data.get("trades", [])]
+            self.engine.risk.day_pnl_rub = data.get("day_pnl_rub", 0.0)
+            self.engine.risk._day = data.get("day_key", "")
             pos = data.get("position")
             if pos:
                 self.engine.position = self._position_from_json(pos)
@@ -215,6 +225,7 @@ class St4Session:
                 paper_cfg = self.cfg.model_copy(deep=True)
                 paper_cfg.connector.mode = "paper"
                 self.engine = TradingEngine(paper_cfg, self.spec_ord, self.spec_pref)
+                self._restore_engine_position()   # live-фолбэк: сохранить журнал/баланс/позицию
         else:
             # синтетика или paper-намерение: строим paper-движок (не трогая cfg.connector.mode)
             paper_cfg = self.cfg
