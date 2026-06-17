@@ -18,7 +18,7 @@ from pathlib import Path
 from . import data_feed as feed
 from .config import St4Config
 from .engine import TradingEngine
-from .models import InstrumentSpec, Role
+from .models import BotState, InstrumentSpec, Role
 from .tbank_sandbox import has_token as _has_token
 
 _BASE = Path(__file__).resolve().parent.parent.parent
@@ -136,6 +136,32 @@ class St4Session:
         """Определить реальные серии SBRF/SBPR (роллировер) и их спецификации."""
         self.spec_ord, self.spec_pref = feed.resolve_legs(self.cfg)
 
+    def _restore_engine_position(self) -> None:
+        """Восстановить открытую позицию из session-файла в (только что пересозданный) движок.
+        Нужно для reconciliation: чтобы сверить позицию счёта с тем, что вёл движок до рестарта."""
+        try:
+            if not self._session_file.exists():
+                return
+            data = json.loads(self._session_file.read_text())
+            pos = data.get("position")
+            if pos:
+                self.engine.position = self._position_from_json(pos)
+                self.engine.state = self.engine.position.state
+                self.engine._bars_held = data.get("bars_held", 0)
+        except Exception:  # noqa: BLE001  битый файл не должен ронять старт
+            pass
+
+    def _position_matches_lots(self, lots: dict) -> bool:
+        """Совпадает ли позиция движка с фактическими лотами sandbox-счёта (по знаку и модулю).
+        long_spread = обычка buy(+) / преф sell(−); short_spread — наоборот."""
+        p = self.engine.position
+        if p is None:
+            return False
+        want_ord = p.leg_ord.lots * (1 if p.leg_ord.side == "buy" else -1)
+        want_pref = p.leg_pref.lots * (1 if p.leg_pref.side == "buy" else -1)
+        return (lots.get(Role.ORDINARY, 0) == want_ord
+                and lots.get(Role.PREFERRED, 0) == want_pref)
+
     def reset_engine(self, real: bool = False) -> None:
         if real:
             try:
@@ -152,20 +178,31 @@ class St4Session:
         if want_sandbox and real:
             try:
                 self.engine = TradingEngine(self.cfg, self.spec_ord, self.spec_pref)
+                # восстановить позицию из сессии ДО reconciliation: если на счёте та же
+                # позиция, что вёл движок до рестарта — она ЛЕГИТИМНА, не закрываем.
+                self._restore_engine_position()
                 self.state["sandbox_active"] = True
-                # RECONCILIATION (§11): движок стартует FLAT, но на sandbox-счёте могут висеть
-                # позиции от прошлой сессии (рестарт прервал стратегию). Приводим счёт к FLAT,
-                # чтобы не было рассинхрона «движок FLAT / на счёте позиция».
+                # RECONCILIATION (§11): сверяем позиции sandbox-счёта с позицией движка.
+                # Совпали → принимаем (движок продолжает вести открытую сделку). Разошлись →
+                # закрываем «осиротевшие» ноги (счёт привести к состоянию движка).
                 try:
                     ex = self.engine.executor
                     lots = ex.broker_lots()
                     if any(v != 0 for v in lots.values()):
-                        self.log_event("warn", f"reconciliation: на sandbox-счёте висят позиции "
-                                       f"{dict((k.value, v) for k, v in lots.items())} — закрываю")
-                        if ex.flat_broker():
-                            self.log_event("info", "reconciliation: счёт приведён к FLAT")
+                        if self._position_matches_lots(lots):
+                            self.log_event("info", f"reconciliation: позиция на счёте "
+                                           f"{dict((k.value, v) for k, v in lots.items())} "
+                                           f"совпала с движком — продолжаем вести сделку")
                         else:
-                            self.log_event("warn", "reconciliation: не удалось закрыть все ноги")
+                            self.log_event("warn", f"reconciliation: на sandbox-счёте висят "
+                                           f"позиции {dict((k.value, v) for k, v in lots.items())} "
+                                           f"(не совпали с движком) — закрываю")
+                            if ex.flat_broker():
+                                self.log_event("info", "reconciliation: счёт приведён к FLAT")
+                                self.engine.position = None
+                                self.engine.state = BotState.FLAT
+                            else:
+                                self.log_event("warn", "reconciliation: не удалось закрыть все ноги")
                 except Exception as e:  # noqa: BLE001  сверка не должна ронять старт
                     self.log_event("warn", f"reconciliation пропущена: {e}")
             except Exception as e:  # noqa: BLE001  sandbox недоступен → откат в paper-движок
@@ -335,7 +372,6 @@ class St4Session:
             self.engine.risk.day_pnl_rub = data.get("day_pnl_rub", 0.0)
             self.engine.risk._day = data.get("day_key", "")
             self.engine.trades = [self._trade_from_json(t) for t in data.get("trades", [])]
-            from .models import BotState
             pos = data.get("position")
             if pos:
                 self.engine.position = self._position_from_json(pos)
