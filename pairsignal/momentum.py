@@ -38,19 +38,32 @@ _BARS_PER_YEAR = {"5m": 365 * 288, "15m": 365 * 96, "1h": 365 * 24, "4h": 365 * 
 # --- ядро: веса портфеля и векторный P&L --------------------------------------
 
 def momentum_weights(prices: pd.DataFrame, lookback: int, holding: int, k: int,
-                     long_short: bool) -> pd.DataFrame:
+                     long_short: bool, market_ma: int = 0) -> pd.DataFrame:
     """Веса портфеля на каждый бар (forward-fill между ребалансами).
 
     Ранг = доходность за lookback ЗАКРЫТЫХ баров: prices/prices.shift(lookback) − 1.
     На барах ребаланса (каждые holding) топ-k → +1/k, дно-k → −1/k (long_short=True),
     иначе только лонг (вес +1/k). Доллар-нейтраль: Σ лонг = +1, Σ шорт = −1.
     No repaint: на баре t используется только momentum по данным ≤ t.
+
+    market_ma > 0 — РЫНОЧНЫЙ ФИЛЬТР (трендовый, только long-only): на ребалансе, если
+    равновзвешенный индекс рынка НИЖЕ своей SMA(market_ma) — портфель уходит в КЭШ (нули).
+    Срезает просадку в медвежьи фазы (бэктест: DD −42% vs −92% у L/S; Sharpe 3.04 vs 1.14
+    на 180д тейкер). Игнорируется при long_short=True (фильтр осмыслен для long-only).
     """
     mom = prices / prices.shift(lookback) - 1.0
+    use_filter = market_ma > 0 and not long_short
+    if use_filter:
+        market = prices.mean(axis=1)                  # равновзвешенный индекс вселенной
+        market_sma = market.rolling(market_ma).mean()
     # NaN-строка = «нет ребаланса» (держим прошлый портфель), числовая строка = новый портфель.
     weights = pd.DataFrame(np.nan, index=prices.index, columns=prices.columns)
 
     for i in range(lookback, len(prices), holding):
+        # рыночный фильтр: медвежий режим (индекс < SMA) → в кэш до следующего ребаланса
+        if use_filter and (np.isnan(market_sma.iloc[i]) or market.iloc[i] < market_sma.iloc[i]):
+            weights.iloc[i] = np.zeros(prices.shape[1])
+            continue
         row = mom.iloc[i].dropna()
         need = 2 * k if long_short else k
         if len(row) < need:
@@ -68,10 +81,11 @@ def momentum_weights(prices: pd.DataFrame, lookback: int, holding: int, k: int,
 
 
 def backtest_momentum(prices: pd.DataFrame, lookback: int, holding: int, k: int,
-                      long_short: bool, fee: float, slippage: float) -> dict:
+                      long_short: bool, fee: float, slippage: float,
+                      market_ma: int = 0) -> dict:
     """Векторный P&L портфеля с издержками оборота. Возвращает метрики + equity-кривую."""
     rets = prices.pct_change().fillna(0.0)
-    w = momentum_weights(prices, lookback, holding, k, long_short)
+    w = momentum_weights(prices, lookback, holding, k, long_short, market_ma)
 
     # доходность портфеля на баре t = Σ вес_{t−1} · доходность_t (вход исполнен прошлым баром)
     port_ret = (w.shift(1) * rets).sum(axis=1)
@@ -201,11 +215,17 @@ def fit_params(prices: pd.DataFrame, lookbacks: list[int], holdings: list[int],
 
 
 def target_weights_now(prices: pd.DataFrame, lookback: int, k: int,
-                       long_short: bool) -> dict[str, float]:
+                       long_short: bool, market_ma: int = 0) -> dict[str, float]:
     """Целевые веса портфеля по ПОСЛЕДНЕМУ закрытому бару (no repaint).
 
     Ранг = доходность за lookback закрытых баров. Топ-k → +1/k, дно-k → −1/k.
+    market_ma > 0 (long-only): если индекс рынка < SMA(market_ma) — КЭШ (пустой портфель).
     """
+    # рыночный фильтр (трендовый, long-only): медвежий режим → в кэш
+    if market_ma > 0 and not long_short and len(prices) > market_ma:
+        market = prices.mean(axis=1)
+        if market.iloc[-1] < market.iloc[-market_ma:].mean():
+            return {}
     mom = (prices.iloc[-1] / prices.iloc[-1 - lookback] - 1.0).dropna()
     need = 2 * k if long_short else k
     if len(mom) < need:
@@ -319,11 +339,13 @@ def _fetch_closes(symbols: list[str], timeframe: str, limit: int, workers: int) 
 
 def run_live(symbols: list[str], timeframe: str, k: int, long_short: bool,
              fee: float, slippage: float, lookback: int, holding: int,
-             poll_seconds: int, state_path: Path, workers: int) -> None:
+             poll_seconds: int, state_path: Path, workers: int,
+             market_ma: int = 0) -> None:
     """Live forward-test: цикл поллинга, ребаланс каждые holding закрытых баров.
 
     БЕЗ реальных ордеров — ведёт бумажный портфель. Ctrl-C — graceful shutdown (сохраняет
     состояние). holding и lookback заданы в барах; ребаланс при появлении новых баров.
+    market_ma > 0 (long-only): рыночный фильтр — в медвежий режим портфель уходит в кэш.
     """
     loaded = load_state(state_path)
     if loaded:
@@ -341,9 +363,11 @@ def run_live(symbols: list[str], timeframe: str, k: int, long_short: bool,
           f"{'long/short' if long_short else 'long-only'}. Ctrl-C для остановки.")
 
     last_bar_ts = port.last_ts
+    # для рыночного фильтра нужно тянуть ≥ market_ma баров истории
+    need_bars = max(lookback, market_ma) + 5
     try:
         while True:
-            prices = _fetch_closes(symbols, timeframe, lookback + 5, workers)
+            prices = _fetch_closes(symbols, timeframe, need_bars, workers)
             if len(prices) >= lookback + 1:
                 bar_ts = int(prices.index[-1])
                 cur = {s: float(prices[s].iloc[-1]) for s in prices.columns}
@@ -351,25 +375,34 @@ def run_live(symbols: list[str], timeframe: str, k: int, long_short: bool,
                     bars_since += 1 if last_bar_ts else holding
                     port.mark(cur, bar_ts)
                     if bars_since >= holding:
-                        tgt = target_weights_now(prices, lookback, k, long_short)
-                        if tgt:
+                        tgt = target_weights_now(prices, lookback, k, long_short, market_ma)
+                        # пустой tgt при market_ma = медвежий режим → ВЫХОД В КЭШ (закрыть всё);
+                        # пустой без фильтра (мало данных) — пропускаем (держим прошлый портфель)
+                        cash_out = market_ma > 0 and not tgt and bool(port.weights)
+                        if tgt or cash_out:
                             rec = port.rebalance(tgt, cur, bar_ts)
                             bars_since = 0
                             ts_s = datetime.fromtimestamp(bar_ts / 1000, tz=timezone.utc
                                                           ).strftime("%Y-%m-%d %H:%M")
-                            longs = ", ".join(s.split("/")[0] for s in rec["longs"])
-                            shorts = ", ".join(s.split("/")[0] for s in rec["shorts"])
-                            print(f"{ts_s} | РЕБАЛАНС | equity ${rec['equity']:.2f} "
-                                  f"| оборот {rec['turnover']:.2f} | ЛОНГ: {longs} "
-                                  f"| ШОРТ: {shorts or '—'}")
+                            if tgt:
+                                longs = ", ".join(s.split("/")[0] for s in rec["longs"])
+                                shorts = ", ".join(s.split("/")[0] for s in rec["shorts"])
+                                print(f"{ts_s} | РЕБАЛАНС | equity ${rec['equity']:.2f} "
+                                      f"| оборот {rec['turnover']:.2f} | ЛОНГ: {longs} "
+                                      f"| ШОРТ: {shorts or '—'}")
+                            else:
+                                print(f"{ts_s} | В КЭШ (рынок < MA{market_ma}) | "
+                                      f"equity ${rec['equity']:.2f}")
                     last_bar_ts = bar_ts
                     save_state(state_path, port, {"bars_since_reb": bars_since,
                                                   "lookback": lookback, "holding": holding,
-                                                  "k": k, "long_short": long_short})
+                                                  "k": k, "long_short": long_short,
+                                                  "market_ma": market_ma})
             time.sleep(poll_seconds)
     except KeyboardInterrupt:
         save_state(state_path, port, {"bars_since_reb": bars_since, "lookback": lookback,
-                                      "holding": holding, "k": k, "long_short": long_short})
+                                      "holding": holding, "k": k, "long_short": long_short,
+                                      "market_ma": market_ma})
         ret = (port.equity / START_EQUITY - 1.0) * 100
         print(f"\nОстановлено. Equity ${port.equity:.2f} ({ret:+.2f}%), "
               f"{len(port.rebalances)} ребалансов. Состояние: {state_path}")
@@ -394,6 +427,8 @@ def main() -> None:
     ap.add_argument("--poll", type=int, default=60, help="период опроса в live, сек")
     ap.add_argument("--lookback", type=int, default=0, help="live: lookback в барах (0=автоподбор)")
     ap.add_argument("--holding", type=int, default=0, help="live: holding в барах (0=автоподбор)")
+    ap.add_argument("--market-ma", type=int, default=0,
+                    help="рыночный фильтр (long-only): в кэш если индекс < SMA(N баров). 0=выкл")
     ap.add_argument("--state", default="", help="live: JSON-файл состояния портфеля")
     args = ap.parse_args()
 
@@ -435,7 +470,7 @@ def main() -> None:
             Path(__file__).parent / "out" / "momentum_live_state.json")
         state_path.parent.mkdir(parents=True, exist_ok=True)
         run_live(list(prices.columns), args.timeframe, args.k, long_short, args.fee,
-                 args.slippage, lb, hd, args.poll, state_path, args.workers)
+                 args.slippage, lb, hd, args.poll, state_path, args.workers, args.market_ma)
         return
 
     bph = _BARS_PER_YEAR.get(args.timeframe, 365 * 24) / 365  # баров в дне
