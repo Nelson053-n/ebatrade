@@ -29,11 +29,19 @@ BT_HISTORY_LEN = 60        # сколько прогонов бэктеста х
 
 # пары обычка/преф, доступные как независимые форвард-тест сессии st4.
 # ключ — идентификатор в API (?pair=), значение — (ASSETCODE обычки, префа, ярлык)
-# (актив_обычка, актив_преф, подпись[, sma_period]). sma_period опционален — дефолт 200;
-# для менее ликвидных пар снижаем, иначе BB не набирается (мало 10m-баров на серию).
+# (актив_обычка, актив_преф, подпись[, params]). params — опц. per-pair настройки стратегии:
+#   int                → только sma_period (краткая форма);
+#   dict               → любые поля StrategyConfig (sma_period, sigma_multiplier, deviation_mode,
+#                        deviation_sigma, stop_sigma, entry_trigger, …). Берутся из КОДА, не из
+#                        session-файла (см. policy_skip в load_session). Дефолты — St4Config.
 ST4_PAIRS: dict[str, tuple] = {
-    "sber": ("SBRF", "SBPR", "Сбербанк"),                  # ликвидная — BB(200)
-    "sngr": ("SNGR", "SNGP", "Сургутнефтегаз", 100),       # сентябрьская серия даёт ~138 баров → BB(100)
+    "sber": ("SBRF", "SBPR", "Сбербанк"),                  # ликвидная — BB(200), дефолтная стратегия
+    # Сургут: спред узкий (~23k, σ~230, размах ~2.2k), дефолтный туннель σ2.0/dev2% почти не даёт
+    # входов и в минусе (−568₽). Узкий туннель Sigma-гейтом: σ1.5/sma60/dev_sigma1.5 → +741₽ win80%,
+    # прибыль в ОБЕИХ половинах OOS-сплита. sma60 (вместо 100) — спред Сургута быстрее «дышит».
+    "sngr": ("SNGR", "SNGP", "Сургутнефтегаз", {
+        "sma_period": 60, "sigma_multiplier": 1.5, "deviation_mode": "Sigma",
+        "deviation_sigma": 1.5, "stop_sigma": 4.0, "entry_trigger": "Breakout"}),
     # Татнефть (TATN/TATP) убрана: обычка и преф-фьючерсы имеют разный лот (100 vs 10),
     # цены контрактов различаются в ~10× — спред несопоставим; преф неликвиден на 10m,
     # ноги почти не синхронизируются (inner-join ~6 баров из 50) — BB(200) не набирается.
@@ -96,15 +104,19 @@ class St4Session:
         self.pair = pair
         spec = ST4_PAIRS[pair]
         asset_ord, asset_pref, self.pair_label = spec[0], spec[1], spec[2]
-        sma_period = spec[3] if len(spec) > 3 else None   # опц. per-pair BB-период (малоликвидные)
+        # опц. per-pair параметры стратегии: int → sma_period, dict → любые поля StrategyConfig
+        params = spec[3] if len(spec) > 3 else None
+        self._pair_params: dict = ({} if params is None
+                                   else {"sma_period": params} if isinstance(params, int)
+                                   else dict(params))
         # sber пишет в исторический session_state_4.json (совместимость со старыми сессиями)
         suffix = "" if pair == "sber" else f"_{pair}"
         self._session_file = _BASE / f"session_state_4{suffix}.json"
         self.cfg = St4Config()
         self.cfg.instruments.asset_ordinary = asset_ord
         self.cfg.instruments.asset_preferred = asset_pref
-        if sma_period is not None:
-            self.cfg.strategy.sma_period = sma_period
+        for key, val in self._pair_params.items():
+            setattr(self.cfg.strategy, key, val)
         self.spec_ord: InstrumentSpec = feed.synthetic_spec(Role.ORDINARY)
         self.spec_pref: InstrumentSpec = feed.synthetic_spec(Role.PREFERRED)
         self.engine = TradingEngine(self.cfg, self.spec_ord, self.spec_pref)
@@ -294,9 +306,10 @@ class St4Session:
         try:
             # параметры-политики (не состояние сессии) — всегда из актуального кода,
             # не из старого файла: иначе обновлённые дефолты роллировера не применятся
-            # sma_period — per-pair политика из ST4_PAIRS (малоликвидные пары), не из файла
+            # per-pair параметры стратегии из ST4_PAIRS — всегда из КОДА, не из старого файла
+            # (иначе изменённый туннель/режим sngr перетрётся прежними значениями сессии)
             policy_skip = {"rollover_no_new_entry_days_before", "rollover_days_before_expiry",
-                           "sma_period"}
+                           *self._pair_params.keys()}
             for k, v in (data.get("config") or {}).items():
                 if hasattr(self.cfg, k) and isinstance(v, dict):
                     sub = getattr(self.cfg, k)
