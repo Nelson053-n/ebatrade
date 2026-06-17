@@ -970,8 +970,8 @@ _MSK = _tz(_td(hours=3))  # московское время для меток st
 def st4_pairs():
     """Список доступных пар обычка/преф — фронт строит переключатель динамически
     (новая пара добавляется ТОЛЬКО в ST4_PAIRS, UI подхватывает сам)."""
-    return {"pairs": [{"id": pid, "ord": o, "pref": p, "label": lbl}
-                      for pid, (o, p, lbl) in ST4_PAIRS.items()]}
+    return {"pairs": [{"id": pid, "ord": spec[0], "pref": spec[1], "label": spec[2]}
+                      for pid, spec in ST4_PAIRS.items()]}
 
 
 @app.get("/st4/state")

@@ -788,3 +788,16 @@ def test_log_event_dedups_repeated_warns():
     assert len(s.events) == 3                 # info разорвал серию warn
     s.state["live"] = True
     assert all("_sig" not in e for e in s.snapshot(0.0)["events"])
+
+
+def test_st4_pairs_endpoint_handles_optional_sma_period():
+    """/st4/pairs не падает на парах с опц. 4-м элементом sma_period (sngr=...,100).
+    Регресс: распаковка `for pid,(o,p,lbl)` ломалась ValueError на 4-кортеже."""
+    from fastapi.testclient import TestClient
+    from pairsignal.api import app
+    r = TestClient(app).get("/st4/pairs")
+    assert r.status_code == 200
+    ids = {p["id"] for p in r.json()["pairs"]}
+    assert {"sber", "sngr"} <= ids
+    for p in r.json()["pairs"]:
+        assert p["ord"] and p["pref"] and p["label"]   # все поля заполнены
