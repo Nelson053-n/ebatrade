@@ -1213,6 +1213,20 @@ def st4_reset(pair: str = "sber"):
     return {"ok": True}
 
 
+@app.post("/st4/reload-params")
+async def st4_reload_params(payload: dict | None = None, pair: str = "sber"):
+    """Горячо переприменить параметры стратегии ОДНОЙ пары — без рестарта сервиса и без
+    потери открытой позиции. Другие пары не затрагиваются. История/BB прогреются заново.
+
+    payload (опц.) — словарь полей StrategyConfig (sma_period, sigma_multiplier, deviation_mode,
+    deviation_sigma, stop_sigma, entry_trigger…): меняет параметры «на лету» без деплоя кода.
+    Без payload — перечитывает ST4_PAIRS из модуля.
+    """
+    ST4 = _st4(pair)
+    res = await asyncio.to_thread(ST4.apply_pair_params, payload or None)
+    return {"ok": True, "pair": pair, **res}
+
+
 @app.post("/st4/restore-position")
 def st4_restore_position(payload: dict, pair: str = "sber"):
     """Восстановить открытую позицию в ЖИВОМ движке (без файловой гонки).

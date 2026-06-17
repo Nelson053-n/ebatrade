@@ -260,6 +260,51 @@ class St4Session:
         self.save_session()
         return True
 
+    def apply_pair_params(self, overrides: dict | None = None) -> dict:
+        """Горячее переприменение per-pair параметров стратегии (без рестарта сервиса и БЕЗ
+        потери открытой позиции/баланса/журнала). Пересобирает движок на новый StrategyConfig;
+        история/BB обнуляются (период SMA мог измениться) — поллер прогреет заново. Другие
+        пары не затрагиваются.
+
+        overrides задан → применяем его (правка параметров «на лету» без деплоя кода).
+        overrides=None → перечитываем ST4_PAIRS из модуля (актуально после git pull + рестарт,
+        но обычно проще передать overrides напрямую).
+        """
+        if overrides is not None:
+            new = dict(overrides)
+        else:
+            spec = ST4_PAIRS[self.pair]
+            params = spec[3] if len(spec) > 3 else None
+            new = ({} if params is None else {"sma_period": params}
+                   if isinstance(params, int) else dict(params))
+        # применяем только валидные поля StrategyConfig
+        new = {k: v for k, v in new.items() if hasattr(self.cfg.strategy, k)}
+        before = {k: getattr(self.cfg.strategy, k) for k in new}
+        for key, val in new.items():
+            setattr(self.cfg.strategy, key, val)
+        self._pair_params = new
+        # пересоздаём движок на новый cfg, ПЕРЕНОСЯ позицию/баланс/журнал/риск
+        prev = self.engine
+        cfg = self.cfg
+        if not self.state.get("sandbox_active"):
+            cfg = self.cfg.model_copy(deep=True)
+            cfg.connector.mode = "paper"
+        eng = TradingEngine(cfg, self.spec_ord, self.spec_pref)
+        eng.balance_rub = prev.balance_rub
+        eng.trades = prev.trades
+        eng.risk.day_pnl_rub = prev.risk.day_pnl_rub
+        eng.risk._day = prev.risk._day
+        eng.position = prev.position          # ОТКРЫТАЯ ПОЗИЦИЯ сохраняется
+        eng.state = prev.state
+        eng._bars_held = prev._bars_held
+        self.engine = eng
+        self.history = []                     # полосы старого периода неприменимы → прогрев заново
+        self.last_live_ts = 0                 # форсируем backfill-прогрев BB новым периодом
+        self.state["warmup_done"] = False
+        self.save_session()
+        self.log_event("info", f"параметры пары переприменены: {new} (было {before})")
+        return {"applied": new, "before": before, "position_kept": eng.position is not None}
+
     def log_event(self, kind: str, message: str) -> None:
         """Записать действие в кольцевой журнал бота (+ last_event для совместимости).
 
