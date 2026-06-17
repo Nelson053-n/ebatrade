@@ -281,7 +281,8 @@ tr:hover td{background:rgba(255,255,255,.015)}
     </div>
 
     <div class="panel fade" style="margin-bottom:14px">
-      <h2>Momentum · live forward-test <em id="m-live-status">—</em></h2>
+      <h2>Momentum · live forward-test <em id="m-live-status">—</em>
+        <button class="ctrl-btn" id="m-refresh" style="float:right;font-size:12px;padding:3px 10px">↻ обновить</button></h2>
       <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
         <div>equity <b id="m-equity" style="font-size:20px">—</b>
           <span id="m-return" style="margin-left:8px"></span></div>
@@ -1680,16 +1681,18 @@ async function momDaily(){
 }
 $('btnDaily').onclick=momDaily;
 let _momLoaded=false;  // тяжёлые бэктест/сравнение автозапускаем один раз за сессию
+$('m-refresh').onclick=()=>{ momState(); momDaily(); };
 function momInit(){
-  momState(); momDaily();
+  momState(); momDaily();   // разовая загрузка при открытии вкладки (без автообновления)
   if(!_momLoaded){
     _momLoaded=true;
     // автозагрузка тяжёлых блоков (грузят историю с биржи; кэшируются на бэке)
     $('btnCompare').click();
     $('btnBacktest').click();
   }
-  if(_momTimer) clearInterval(_momTimer);
-  _momTimer=setInterval(()=>{ if(SLOT===3){ momState(); momDaily(); } }, 30000);
+  // автообновление убрано по запросу: st3 обновляется только при открытии вкладки
+  // или по кнопке «обновить». Таймер на всякий случай гасим.
+  if(_momTimer){ clearInterval(_momTimer); _momTimer=null; }
 }
 $('btnBacktest').onclick=async()=>{
   const q=`top=${+$('bt-top').value}&days=${+$('bt-days').value}&k=${+$('bt-k').value}&timeframe=${$('bt-tf').value}`;
