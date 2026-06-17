@@ -1213,6 +1213,45 @@ def st4_reset(pair: str = "sber"):
     return {"ok": True}
 
 
+@app.post("/st4/restore-position")
+def st4_restore_position(payload: dict, pair: str = "sber"):
+    """Восстановить открытую позицию в ЖИВОМ движке (без файловой гонки).
+
+    Для случая, когда позиция «осиротела»: висит на sandbox-счёте, а движок её потерял
+    (напр. reconciliation не смог закрыть в неторговое время). Ставим позицию прямо в
+    объект движка в памяти и сохраняем сессию. payload: state(long_spread|short_spread),
+    ord_code, pref_code, lots, ord_entry, pref_entry [, sma_at_entry, bars_held].
+    """
+    from .st4.models import BotState, LegPosition, Position, Role
+    ST4 = _st4(pair)
+    try:
+        state = BotState(payload["state"])
+        if state not in (BotState.LONG_SPREAD, BotState.SHORT_SPREAD):
+            raise HTTPException(400, "state: long_spread | short_spread")
+        lots = int(payload["lots"])
+        # long_spread = обычка buy / преф sell; short_spread — наоборот
+        ord_side = "buy" if state == BotState.LONG_SPREAD else "sell"
+        pref_side = "sell" if state == BotState.LONG_SPREAD else "buy"
+        ord_entry = float(payload["ord_entry"])
+        pref_entry = float(payload["pref_entry"])
+        leg_ord = LegPosition(code=payload["ord_code"], role=Role.ORDINARY, side=ord_side,
+                              lots=lots, entry_price=ord_entry)
+        leg_pref = LegPosition(code=payload["pref_code"], role=Role.PREFERRED, side=pref_side,
+                               lots=lots, entry_price=pref_entry)
+        ST4.engine.position = Position(
+            state=state, leg_ord=leg_ord, leg_pref=leg_pref,
+            entry_ts=int(payload.get("entry_ts", 0)),
+            entry_spread=pref_entry - ord_entry, entry_beta=1.0,
+            sma_at_entry=float(payload.get("sma_at_entry", pref_entry - ord_entry)),
+            entry_fee_rub=float(payload.get("entry_fee_rub", 0.0)))
+        ST4.engine.state = state
+        ST4.engine._bars_held = int(payload.get("bars_held", 0))
+        ST4.save_session()
+        return {"ok": True, "position": ST4.engine.state.value, "lots": lots}
+    except KeyError as e:
+        raise HTTPException(400, f"нет поля: {e}")
+
+
 @app.post("/st4/connector")
 def st4_connector(payload: dict, pair: str = "sber"):
     """Установить режим исполнителя (paper|tbank_sandbox) и (опц.) API-токен T-Bank.
