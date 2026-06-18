@@ -1,8 +1,9 @@
-"""Движок st5 — FSM VWAP-reversion на одиночном инструменте + paper-исполнение.
+"""Движок st5 — FSM directional momentum на одиночном инструменте + paper-исполнение.
 
-Принимает закрытые OHLCV-бары → гоняет внутридневной VWAP → сигнал входа на пробое
-коридора → исполнение одиночного ордера (paper) → выход по возврату к VWAP / тейку /
-стопу / концу сессии. Без атомарных пар (один инструмент → один ордер).
+Принимает закрытые OHLCV-бары → гоняет MomentumIndicator (close vs close[-lookback]) →
+вход по направлению тренда → исполнение одиночного ордера (paper) → выход по holding /
+ранний стоп (stop_pct) / конец сессии. Без атомарных пар (один инструмент → один ордер).
+FSM: FLAT → (сигнал) → LONG/SHORT → (holding/стоп/EOD) → FLAT.
 """
 from __future__ import annotations
 
@@ -13,16 +14,16 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from .config import St5Config
-from .indicators import IntradayVwap, VolumeAverage
+from .indicators import MomentumIndicator, VolumeAverage
 from .models import (
     BotState,
     EngineEvent,
     InstrumentSpec,
+    MomentumReading,
     Position,
     PriceBar,
     Signal,
     Trade,
-    VwapReading,
 )
 from .strategy import entry_signal, exit_signal, in_clearing_window, is_session_end
 
@@ -30,7 +31,7 @@ from .strategy import entry_signal, exit_signal, in_clearing_window, is_session_
 @dataclass
 class StepResult:
     state: BotState
-    reading: Optional[VwapReading] = None
+    reading: Optional[MomentumReading] = None
     signal: Signal = Signal.NONE
     trade: Optional[Trade] = None
     awaiting_approval: bool = False
@@ -106,8 +107,7 @@ class TradingEngine:
     def __init__(self, cfg: St5Config, spec: InstrumentSpec) -> None:
         self.cfg = cfg
         self.spec = spec
-        self.vwap = IntradayVwap(cfg.strategy.band_sigma, cfg.strategy.min_bars_in_day,
-                                 cfg.strategy.std_mode)
+        self.momentum = MomentumIndicator(cfg.strategy.lookback)
         self.volavg = VolumeAverage()
         self.risk = RiskManager(cfg.risk, cfg.session)
 
@@ -115,10 +115,9 @@ class TradingEngine:
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
         self.balance_rub = cfg.paper.start_balance_rub
-        self._prev: Optional[VwapReading] = None
         self._bars_held = 0
-        self._pending: Optional[tuple[Signal, VwapReading]] = None
-        self.last_reading: Optional[VwapReading] = None
+        self._pending: Optional[tuple[Signal, MomentumReading]] = None
+        self.last_reading: Optional[MomentumReading] = None
         self._last_bar: Optional[PriceBar] = None
         self._last_vol_avg = float("nan")
         self._armed = True
@@ -142,10 +141,10 @@ class TradingEngine:
                 out.append(res)
         return out
 
-    def warmup_vwap(self, bars: list[PriceBar]) -> None:
-        """Прогрев VWAP историей (без сигналов): просто прокручиваем индикатор."""
+    def warmup(self, bars: list[PriceBar]) -> None:
+        """Прогрев momentum-буфера историей (без сигналов): прокручиваем индикатор."""
         for b in bars:
-            self.vwap.update(b)
+            self.momentum.update(b.close)
             self.volavg.update(b.ts, b.volume)
 
     def days_to_expiry(self, ts_ms: int) -> Optional[int]:
@@ -161,13 +160,13 @@ class TradingEngine:
     # ---------- основной шаг FSM ----------
     def step(self, bar: PriceBar) -> StepResult:
         self._last_bar = bar
-        reading = self.vwap.update(bar)
+        reading = self.momentum.update(bar.close)
+        reading.ts = bar.ts
         self._last_vol_avg = self.volavg.update(bar.ts, bar.volume)
         self.last_reading = reading
         events: list[EngineEvent] = []
 
         if self.state == BotState.HALTED:
-            self._prev = reading
             return StepResult(state=self.state, reading=reading, events=events)
 
         if self.position is not None:
@@ -179,7 +178,6 @@ class TradingEngine:
             trade = self._close_position(bar, "eod")
             events.append(EngineEvent(bar.ts, "exit",
                           f"конец сессии — закрытие (net {trade.net_pnl_rub:+.0f}₽)", {}))
-            self._prev = reading
             return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                               trade=trade, events=events)
 
@@ -190,7 +188,6 @@ class TradingEngine:
                 trade = self._close_position(bar, "rollover")
                 events.append(EngineEvent(bar.ts, "exit",
                               f"роллировер: до экспирации {d2e} дн (net {trade.net_pnl_rub:+.0f}₽)", {}))
-                self._prev = reading
                 return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                                   trade=trade, events=events)
 
@@ -201,44 +198,25 @@ class TradingEngine:
             self.state = BotState.HALTED
             events.append(EngineEvent(bar.ts, "halt",
                           f"дневной лимит: позиция закрыта (net {trade.net_pnl_rub:+.0f}₽), HALTED", {}))
-            self._prev = reading
             return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                               trade=trade, events=events)
 
-        # ---- управление открытой позицией (выход — авто) ----
-        if self.position is not None and self._prev is not None and reading.is_ready:
-            vwap_level = (self.position.entry_vwap
-                          if self.cfg.strategy.freeze_vwap_on_exit else reading.vwap)
-            crossed = exit_signal(self.state, self._prev, reading, vwap_level)
-            time_stop = (self.cfg.strategy.max_bars_in_trade > 0
-                         and self._bars_held >= self.cfg.strategy.max_bars_in_trade)
-            ss = self.cfg.strategy.stop_sigma
-            sigma_stop = False
-            if ss > 0 and reading.sigma > 0:
-                if self.state == BotState.SHORT:
-                    sigma_stop = reading.price >= reading.vwap + ss * reading.sigma
-                elif self.state == BotState.LONG:
-                    sigma_stop = reading.price <= reading.vwap - ss * reading.sigma
-            tp = self.cfg.strategy.take_profit_sigma
-            take = False
-            if tp > 0 and reading.sigma > 0 and not crossed:
-                if self.state == BotState.SHORT:
-                    take = reading.price <= reading.vwap + tp * reading.sigma
-                elif self.state == BotState.LONG:
-                    take = reading.price >= reading.vwap - tp * reading.sigma
-            if crossed or time_stop or sigma_stop or take:
-                reason = ("exit" if crossed else "stop" if sigma_stop
-                          else "take" if take else "time_stop")
+        # ---- управление открытой позицией (выход — авто): holding / стоп ----
+        if self.position is not None:
+            should_exit, reason = exit_signal(
+                self.position, self._bars_held, bar.close,
+                self.cfg.strategy.holding, self.cfg.strategy.stop_pct)
+            if should_exit:
                 trade = self._close_position(bar, reason)
+                label = "стоп" if reason == "stop" else "holding"
                 events.append(EngineEvent(bar.ts, "exit",
-                              f"выход ({reason}): net {trade.net_pnl_rub:+.0f}₽", {}))
-                self._prev = reading
+                              f"выход ({label}): net {trade.net_pnl_rub:+.0f}₽", {}))
                 return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                                   trade=trade, events=events)
 
         # ---- поиск входа ----
-        if self.position is None and self._armed and self._prev is not None and reading.is_ready:
-            sig = entry_signal(self._prev, reading, self.cfg.strategy)
+        if self.position is None and self._armed and reading.is_ready:
+            sig = entry_signal(reading)
             if sig != Signal.NONE:
                 d2e = self.days_to_expiry(bar.ts)
                 no_entry = self.cfg.instrument.rollover_no_new_entry_days_before
@@ -259,19 +237,15 @@ class TradingEngine:
                     if not ok:
                         events.append(EngineEvent(bar.ts, "warn", f"вход запрещён: {why}", {}))
                     elif self.cfg.auto_approve:
-                        res = self._open_position(sig, reading, bar, events)
-                        self._prev = reading
-                        return res
+                        return self._open_position(sig, reading, bar, events)
                     else:
                         self._pending = (sig, reading)
                         self.state = BotState.ENTERING
                         events.append(EngineEvent(bar.ts, "signal",
                                       f"сигнал {sig.value.upper()} — ждёт подтверждения", {}))
-                        self._prev = reading
                         return StepResult(state=self.state, reading=reading, signal=sig,
                                           awaiting_approval=True, events=events)
 
-        self._prev = reading
         return StepResult(state=self.state, reading=reading, events=events)
 
     # ---------- фильтры входа ----------
@@ -310,7 +284,7 @@ class TradingEngine:
                 + self.cfg.execution.tick_offset) * self.spec.tick_size
         return ref + cost if side == "buy" else ref - cost
 
-    def _open_position(self, sig: Signal, reading: VwapReading, bar: PriceBar,
+    def _open_position(self, sig: Signal, reading: MomentumReading, bar: PriceBar,
                        events: list[EngineEvent]) -> StepResult:
         self.state = BotState.ENTERING
         lots = self.cfg.execution.quantity_lots
@@ -321,13 +295,16 @@ class TradingEngine:
         self.balance_rub -= fee
         self.risk.on_success()
         new_state = BotState.LONG if sig == Signal.BUY else BotState.SHORT
+        # entry_vwap (имя поля персиста) = close[-lookback] на входе — база momentum
+        ref = reading.ref_price if not math.isnan(reading.ref_price) else fill
         self.position = Position(state=new_state, side=side, lots=lots, entry_price=fill,
-                                 entry_ts=bar.ts, entry_vwap=reading.vwap, entry_fee_rub=fee)
+                                 entry_ts=bar.ts, entry_vwap=ref, entry_fee_rub=fee)
         self._entry_slip = slip
         self.state = new_state
         self._bars_held = 0
         events.append(EngineEvent(bar.ts, "position",
-                      f"вход {new_state.value}: {side} @ {fill:.0f} (VWAP {reading.vwap:.0f})", {}))
+                      f"вход {new_state.value}: {side} @ {fill:.0f} "
+                      f"(momentum {reading.lookback_return * 100:+.2f}%)", {}))
         return StepResult(state=self.state, reading=reading, signal=sig, events=events)
 
     def _close_position(self, bar: PriceBar, reason: str) -> Trade:

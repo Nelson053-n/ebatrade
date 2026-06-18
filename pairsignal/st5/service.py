@@ -1,4 +1,4 @@
-"""Сервисный слой st5: состояние сессии VWAP-reversion + фоновые задачи + персист.
+"""Сервисный слой st5: состояние сессии directional momentum + фоновые задачи + персист.
 
 St5Session держит движок, конфиг, историю графика, потоки live/player — по образцу
 St4Session, но для одиночного инструмента (без пары, без sandbox: paper-only Phase 1).
@@ -128,18 +128,19 @@ class St5Session:
         if r is None or not r.is_ready:
             return
         if any(v is None or (isinstance(v, float) and math.isnan(v))
-               for v in (r.price, r.vwap, r.upper, r.lower)):
+               for v in (r.price, r.ref_price)):
             return
-        self.history.append({"ts": ts, "price": round(r.price, 1), "vwap": round(r.vwap, 1),
-                             "upper": round(r.upper, 1), "lower": round(r.lower, 1),
-                             "sigma": round(r.sigma, 1)})
+        # для графика: close + база сравнения + метка направления momentum
+        self.history.append({"ts": ts, "price": round(r.price, 1),
+                             "ref_price": round(r.ref_price, 1), "signal": r.signal,
+                             "lookback_return": round(r.lookback_return * 100, 3)})
         if len(self.history) > HISTORY_LEN:
             del self.history[0]
 
     def warmup_limit(self) -> int:
-        # VWAP внутридневной — баров дня хватает; берём 3 дня запасом
+        # momentum смотрит на lookback баров назад — берём с запасом (lookback + 3 дня)
         bpd = int(14 * 60 / self.cfg.strategy.candle_interval_minutes)
-        return bpd * 3 + 20
+        return self.cfg.strategy.lookback + bpd * 3 + 20
 
     # ---------- персист ----------
     def save_session(self) -> None:
@@ -233,7 +234,7 @@ class St5Session:
         replayed = False
         self.engine._check_lag = True
         self.log_event("info", f"live запущен (paper, MOEX ISS): {self.spec.code}, "
-                       f"прогрев VWAP…")
+                       f"прогрев momentum…")
         while self.state["live"]:
             try:
                 d2e = self.engine.days_to_expiry(int(time.time() * 1000))
@@ -333,40 +334,42 @@ class St5Session:
     # ---------- снимок для API ----------
     def snapshot(self, server_started: float) -> dict:
         eng = self.engine
+        s = self.cfg.strategy
         pos = None
         if eng.position is not None:
             p = eng.position
             pos = {"state": p.state.value, "entry_ts": p.entry_ts,
                    "side": p.side, "lots": p.lots,
                    "entry_price": round(p.entry_price, 0),
-                   "entry_vwap": round(p.entry_vwap, 0),
+                   "entry_ref": round(p.entry_vwap, 0),   # close[-lookback] на входе
                    "unrealized_rub": round(eng.unrealized_rub(), 0),
-                   "bars_held": eng._bars_held}
+                   "bars_held": eng._bars_held, "holding": s.holding}
         pending = None
         if eng._pending is not None:
             sig, r = eng._pending
-            pending = {"signal": sig.value, "price": round(r.price, 1), "vwap": round(r.vwap, 1)}
+            pending = {"signal": sig.value, "price": round(r.price, 1),
+                       "ref_price": round(r.ref_price, 1)}
 
         last_bar_ts = self.last_live_ts or (self.history[-1]["ts"] if self.history else 0)
         lag_min = round((time.time() - last_bar_ts / 1000) / 60) if last_bar_ts else None
         r = eng.last_reading
-        cur_z = ((r.price - r.vwap) / r.sigma) if (r and r.is_ready and r.sigma > 0) else None
+        cur_signal = r.signal if (r and r.is_ready) else 0
+        lookback_return = (round(r.lookback_return * 100, 3)
+                           if (r and r.is_ready) else None)
+        _dir = {1: "вверх (LONG)", -1: "вниз (SHORT)", 0: "флэт"}.get(cur_signal, "—")
 
         if eng.risk.halted:
             wait = "HALTED — нужен ручной разбор"
         elif eng.position is not None:
-            wait = "в позиции — ждём возврата к VWAP"
+            wait = f"в позиции — держим {eng._bars_held}/{s.holding} баров (стоп {s.stop_pct * 100:g}%)"
         elif not (self.state["live"] or self.state["player"]):
             wait = "остановлено"
         elif r is None or not r.is_ready:
-            wait = f"прогрев VWAP (нужно ≥{self.cfg.strategy.min_bars_in_day} баров дня)"
+            wait = f"прогрев momentum (нужно >{s.lookback} баров)"
         elif self.state["data_source"] == "live" and lag_min is not None and lag_min > 25:
             wait = f"ждём свежий бар — MOEX ISS ({lag_min} мин лаг)"
-        elif cur_z is not None and abs(cur_z) < self.cfg.strategy.band_sigma:
-            wait = (f"ждём сигнал: цена в коридоре "
-                    f"(z={cur_z:+.2f}, вход при |z|≥{self.cfg.strategy.band_sigma:g})")
         else:
-            wait = "ждём закрытие следующего бара"
+            wait = f"ждём вход по тренду: momentum {lookback_return:+.2f}% → {_dir}"
 
         return _clean({
             "live": self.state["live"], "player": self.state["player"],
@@ -383,11 +386,10 @@ class St5Session:
             "asset": self.cfg.instrument.asset,
             "leg": {"code": self.spec.code, "expiry": self.spec.expiry},
             "interval_min": self.cfg.strategy.candle_interval_minutes,
-            "band_sigma": self.cfg.strategy.band_sigma,
-            "stop_sigma": self.cfg.strategy.stop_sigma,
-            "take_profit_sigma": self.cfg.strategy.take_profit_sigma,
-            "entry_trigger": self.cfg.strategy.entry_trigger,
-            "flat_at_session_end": self.cfg.strategy.flat_at_session_end,
+            "lookback": s.lookback,
+            "holding": s.holding,
+            "stop_pct": s.stop_pct,
+            "flat_at_session_end": s.flat_at_session_end,
             "pending": pending, "position": pos,
             "summary": eng.summary(),
             "history": self.history,
@@ -399,7 +401,9 @@ class St5Session:
             "last_bar_ts": last_bar_ts or None,
             "warmup_done": bool(r and r.is_ready),
             "trade_start_ts": self.state.get("trade_start_ts"),
-            "cur_z": round(cur_z, 2) if cur_z is not None else None,
-            "strategy_name": "VWAP-reversion %s · коридор %gσ" % (
-                self.cfg.instrument.asset, self.cfg.strategy.band_sigma),
+            "cur_signal": cur_signal,
+            "lookback_return": lookback_return,
+            "cur_z": None,   # DEPRECATED (VWAP) — оставлено, чтобы старый лог snapshot.py не падал
+            "strategy_name": "Momentum %s · lb%d/h%d" % (
+                self.cfg.instrument.asset, s.lookback, s.holding),
         })

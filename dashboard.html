@@ -661,10 +661,9 @@ tr:hover td{background:rgba(255,255,255,.015)}
         <div class="panel fade" style="margin-top:14px">
           <h2>Параметры</h2>
           <div class="params" style="margin-top:0;gap:12px">
-            <div class="fld"><label>коридор σ</label><input id="s5-p-band" type="number" step="0.5" min="0.5" style="width:70px"></div>
-            <div class="fld"><label>стоп σ</label><input id="s5-p-stop" type="number" step="0.5" min="0" style="width:70px"></div>
-            <div class="fld"><label>тейк σ</label><input id="s5-p-take" type="number" step="0.5" min="0" style="width:70px"></div>
-            <div class="fld"><label>вход</label><select id="s5-p-trigger" style="width:110px"><option value="Breakout">Breakout</option><option value="ReEntry">ReEntry</option></select></div>
+            <div class="fld"><label>lookback</label><input id="s5-p-lookback" type="number" step="1" min="2" style="width:70px"></div>
+            <div class="fld"><label>holding</label><input id="s5-p-holding" type="number" step="1" min="1" style="width:70px"></div>
+            <div class="fld"><label>стоп %</label><input id="s5-p-stoppct" type="number" step="0.1" min="0" style="width:70px"></div>
             <div class="fld"><label>лотов</label><input id="s5-p-lots" type="number" min="1" style="width:70px"></div>
           </div>
           <button class="ctrl-btn approve" id="s5-btn-apply" style="margin-top:12px">применить</button>
@@ -2523,12 +2522,12 @@ function s5Render(s){
   _s5snap=s;
   // заголовки
   if(s.asset){
-    $('s5-title').childNodes[0].nodeValue=`st5 · VWAP-reversion ${s.asset} `;
-    $('s5-title-sub').textContent=`${s.inst_label||''}, FORTS · возврат к внутридневному VWAP`;
+    $('s5-title').childNodes[0].nodeValue=`st5 · Momentum ${s.asset} `;
+    $('s5-title-sub').textContent=`${s.inst_label||''}, FORTS · внутридневной тренд (lb${s.lookback||48}/h${s.holding||18})`;
   }
   $('s5-leg').textContent = 'серия: '+(s.leg && s.leg.code || '—')+(s.leg&&s.leg.expiry?` (эксп. ${s.leg.expiry.slice(5)})`:'');
   // --- глобальная шапка/футер под st5 (иначе остаются плашки st1/st2/st4) ---
-  const hp=$('hdr-pair'); if(hp && s.asset) hp.innerHTML=s.asset+' <span style="opacity:.5">·VWAP</span>';
+  const hp=$('hdr-pair'); if(hp && s.asset) hp.innerHTML=s.asset+' <span style="opacity:.5">·MOM</span>';
   if($('hdr-tag')) $('hdr-tag').textContent='phase 1 · paper';
   if($('hdr-data')) $('hdr-data').textContent='данные: '+(s.data_provider||'—');
   if($('hdr-exch')) $('hdr-exch').textContent='виртуальная биржа';
@@ -2538,11 +2537,12 @@ function s5Render(s){
     hf5.querySelector('.dot').style.boxShadow=on?'':'none';
     hf5.childNodes[1].nodeValue=on?' поток активен':' остановлено'; }
   const note5=$('page-note');
-  if(note5) note5.innerHTML='<b>st5 — VWAP-reversion на одиночном фьючерсе ('+(s.asset||'')+', FORTS).</b> '
-    +'Режим <b>paper</b>: реальные ордера не выставляются. Цена возвращается к внутридневному VWAP '
-    +'(сброс каждый день), вход по пробою коридора ±k·σ, выход к VWAP / тейк / стоп, '
-    +'обязательное закрытие к концу сессии (нет овернайт-риска). Данные — синтетика (демо) или '
-    +'реальные котировки MOEX ISS по закрытым свечам (no repaint). <b>Эдж слабый — форвард-тест гипотезы.</b>';
+  if(note5) note5.innerHTML='<b>st5 — внутридневной momentum на одиночном фьючерсе ('+(s.asset||'')+', FORTS).</b> '
+    +'Режим <b>paper</b>: реальные ордера не выставляются. Сигнал по тренду: цена выше уровня '
+    +(s.lookback||48)+' баров назад → ЛОНГ, ниже → ШОРТ; удержание '+(s.holding||18)+' баров, защитный стоп, '
+    +'закрытие к концу сессии (нет овернайт-риска). Данные — синтетика (демо) или реальные котировки '
+    +'MOEX ISS по закрытым свечам (no repaint). <b>Заменил VWAP-reversion (тот не имел эджа); '
+    +'momentum lb48/h18 прибылен на обоих инструментах OOS.</b>';
   const bl5=$('s5-btn-live'); if(bl5 && !s.live) bl5.textContent='▶ live (ISS)';
   // статус
   let dot='var(--ink-faint)', txt=s.wait_reason||'—';
@@ -2553,7 +2553,8 @@ function s5Render(s){
   $('s5-status-dot').style.background=dot;
   $('s5-status-txt').textContent = s.live?'LIVE':(s.player?'демо':'остановлено');
   let sub=s.strategy_name||'';
-  if(s.cur_z!=null) sub+=` · z=${s.cur_z>=0?'+':''}${s.cur_z}`;
+  if(s.cur_signal!=null){ const sg=s.cur_signal>0?'тренд ↑ (LONG)':s.cur_signal<0?'тренд ↓ (SHORT)':'флэт';
+    sub+=` · ${sg}`; if(s.lookback_return!=null) sub+=` ${s.lookback_return>=0?'+':''}${s.lookback_return}%`; }
   if(s.data_source==='live'&&s.data_lag_min!=null) sub+=` · бар ${s.data_lag_min} мин назад`;
   $('s5-status-sub').textContent=sub;
   // halt
@@ -2565,13 +2566,13 @@ function s5Render(s){
   if(s.position){
     const p=s.position, col=p.unrealized_rub>=0?'var(--signal)':'var(--loss)';
     pb.style.display='';
-    pb.innerHTML=`<b style="color:${p.state==='long'?'var(--signal)':'var(--short)'}">${p.state==='long'?'ЛОНГ':'ШОРТ'}</b> ${p.lots} лот · вход @ ${p.entry_price} (VWAP ${p.entry_vwap})<br>`
-      +`держит ${p.bars_held} бар · нереализ <b style="color:${col}">${s5money(p.unrealized_rub)}</b>`;
+    pb.innerHTML=`<b style="color:${p.state==='long'?'var(--signal)':'var(--short)'}">${p.state==='long'?'ЛОНГ':'ШОРТ'}</b> ${p.lots} лот · вход @ ${p.entry_price}<br>`
+      +`держит ${p.bars_held}/${p.holding||s.holding||18} бар · нереализ <b style="color:${col}">${s5money(p.unrealized_rub)}</b>`;
   } else pb.style.display='none';
   // pending
   const pe=$('s5-pending'), cr=$('s5-confirm-row');
   if(s.pending){ pe.style.display=''; cr.style.display='flex';
-    pe.innerHTML=`<div style="padding:8px 12px;border-radius:8px;background:rgba(255,182,72,.12);color:var(--warn);font-size:12px">сигнал <b>${s.pending.signal.toUpperCase()}</b> · цена ${s.pending.price} / VWAP ${s.pending.vwap}</div>`;
+    pe.innerHTML=`<div style="padding:8px 12px;border-radius:8px;background:rgba(255,182,72,.12);color:var(--warn);font-size:12px">сигнал <b>${s.pending.signal.toUpperCase()}</b> · цена ${s.pending.price} / отсчёт ${s.pending.ref_price!=null?s.pending.ref_price:'—'}</div>`;
   } else { pe.style.display='none'; cr.style.display='none'; }
   // чекбоксы
   $('s5-auto').checked=!!s.auto_approve; $('s5-trading').checked=!!s.trading_enabled;
@@ -2584,8 +2585,8 @@ function s5Render(s){
     `equity <b>${Math.round(sm.equity_rub||0).toLocaleString('ru')} ₽</b> (${fmt(sm.return_pct||0,3)}%) · стопов ${sm.stops||0}`;
   // параметры (только если не редактируется)
   if(document.activeElement && document.activeElement.id && document.activeElement.id.startsWith('s5-p-')){}
-  else { $('s5-p-band').value=s.band_sigma; $('s5-p-stop').value=s.stop_sigma;
-    $('s5-p-take').value=s.take_profit_sigma; $('s5-p-trigger').value=s.entry_trigger;
+  else { $('s5-p-lookback').value=s.lookback; $('s5-p-holding').value=s.holding;
+    $('s5-p-stoppct').value=s.stop_pct!=null?(s.stop_pct*100).toFixed(1):'';
     $('s5-p-lots').value=(s.summary&&s.cfg_lots)||$('s5-p-lots').value||1; }
   // журнал
   const ev=$('s5-events');
@@ -2607,7 +2608,7 @@ function s5RenderTrades(trades){
   if(!trades.length){ tb.innerHTML='<tr><td colspan="6" class="empty">сделок ещё не было</td></tr>'; return; }
   trades.slice().reverse().forEach(t=>{
     const dir=t.state==='long'?'<span style="color:var(--signal)">лонг</span>':'<span style="color:var(--short)">шорт</span>';
-    const rs={exit:'возврат к VWAP',take:'тейк',stop:'стоп σ',eod:'конец сессии',time_stop:'тайм-стоп',flat_all:'flat-all',rollover:'роллировер'}[t.reason]||t.reason;
+    const rs={exit:'выход',take:'тейк',stop:'стоп',eod:'конец сессии',time_stop:'удержание',flat_all:'flat-all',rollover:'роллировер'}[t.reason]||t.reason;
     const tr=document.createElement('tr');
     tr.innerHTML=`<td>${dir}</td><td>${Math.round(t.entry_price)} → ${Math.round(t.exit_price)}</td>`+
       `<td>${t.lots}</td><td>${t.bars_held}</td>`+
@@ -2638,8 +2639,8 @@ function s5DrawChart(hist, trades, openPos){
   const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
   const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
   const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
-  const full=(data.hist||[]).filter(p=>p.vwap!=null&&!Number.isNaN(p.vwap));
-  if(full.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев VWAP…',12,24); return; }
+  const full=(data.hist||[]).filter(p=>p.price!=null&&!Number.isNaN(p.price));
+  if(full.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев momentum…',12,24); return; }
   _s5fullLen=full.length;
   const visN=Math.max(10, Math.round(full.length*_s5zoom));
   const right=_s5panRight==null?full.length:Math.min(full.length,Math.max(visN,_s5panRight));
@@ -2652,7 +2653,7 @@ function s5DrawChart(hist, trades, openPos){
            ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
   const ML=54,MB=22,MT=6,MR=8;
   const px0=ML,px1=W-MR,py0=MT,py1=H-MB;
-  const all=series.flatMap(p=>[p.upper,p.lower,p.price]);
+  const all=series.flatMap(p=>[p.price, p.ref_price].filter(v=>v!=null&&!Number.isNaN(v)));
   let lo=Math.min(...all), hi=Math.max(...all); const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
   const x=i=>px0+i/(series.length-1)*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
   ctx.font='9px IBM Plex Mono, monospace'; ctx.textBaseline='middle'; ctx.textAlign='right';
@@ -2668,16 +2669,19 @@ function s5DrawChart(hist, trades, openPos){
     ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.35;
     ctx.beginPath(); ctx.moveTo(xx,py0); ctx.lineTo(xx,py1); ctx.stroke(); ctx.globalAlpha=1;
     ctx.fillStyle=C.ax; ctx.fillText(lbl, xx, py1+5); }
-  // заливка коридора
-  ctx.beginPath(); series.forEach((p,i)=>{const X=x(i),Y=y(p.upper); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
-  for(let i=series.length-1;i>=0;i--) ctx.lineTo(x(i),y(series[i].lower));
-  ctx.closePath(); ctx.fillStyle=C.fill; ctx.fill();
-  ['upper','lower'].forEach(k=>{ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p[k]);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.band;ctx.lineWidth=1;ctx.stroke();});
-  // VWAP (пунктир)
-  ctx.setLineDash([4,4]);ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.vwap);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});ctx.strokeStyle=C.mid;ctx.stroke();ctx.setLineDash([]);
-  // цена
-  ctx.beginPath();series.forEach((p,i)=>{const X=x(i),Y=y(p.price);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
-  ctx.strokeStyle=C.line;ctx.lineWidth=1.6;ctx.stroke();
+  // линия отсчёта momentum (цена lookback баров назад) — пунктир: выше неё тренд вверх (LONG), ниже — вниз
+  if(series.some(p=>p.ref_price!=null)){
+    ctx.setLineDash([4,4]);ctx.beginPath();
+    series.forEach((p,i)=>{if(p.ref_price==null)return;const X=x(i),Y=y(p.ref_price);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+    ctx.strokeStyle=C.mid;ctx.lineWidth=1;ctx.stroke();ctx.setLineDash([]);
+  }
+  // цена — цвет сегмента по знаку сигнала (зелёный=тренд вверх/LONG, красный=вниз/SHORT)
+  const win0=cs.getPropertyValue('--signal').trim(), loss0=cs.getPropertyValue('--loss').trim();
+  for(let i=1;i<series.length;i++){
+    const sig=series[i].signal;
+    ctx.beginPath();ctx.moveTo(x(i-1),y(series[i-1].price));ctx.lineTo(x(i),y(series[i].price));
+    ctx.strokeStyle = sig>0?win0 : sig<0?loss0 : C.line; ctx.lineWidth=1.6; ctx.stroke();
+  }
   // сделки
   const win=cs.getPropertyValue('--signal').trim(), loss=cs.getPropertyValue('--loss').trim();
   const ink=cs.getPropertyValue('--ink').trim(), panel=cs.getPropertyValue('--panel').trim();
@@ -2750,8 +2754,8 @@ function s5Init(){
     $('s5-btn-approve').onclick=async()=>{ await s5api('/approve','POST'); s5Poll(); };
     $('s5-btn-reject').onclick=async()=>{ await s5api('/reject','POST'); s5Poll(); };
     $('s5-btn-apply').onclick=async()=>{
-      const body={ band_sigma:+$('s5-p-band').value, stop_sigma:+$('s5-p-stop').value,
-        take_profit_sigma:+$('s5-p-take').value, entry_trigger:$('s5-p-trigger').value, quantity_lots:+$('s5-p-lots').value };
+      const body={ lookback:+$('s5-p-lookback').value, holding:+$('s5-p-holding').value,
+        stop_pct:(+$('s5-p-stoppct').value)/100, quantity_lots:+$('s5-p-lots').value };
       $('s5-apply-msg').textContent='применяю…';
       try{ await s5api('/config','POST',body); $('s5-apply-msg').textContent='✓'; s5Poll(); }
       catch(e){ $('s5-apply-msg').textContent='ошибка: '+e.message; }

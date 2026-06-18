@@ -1,13 +1,23 @@
-"""Конфигурация st5 (VWAP-reversion) — pydantic v2, без хардкода.
+"""Конфигурация st5 (directional momentum) — pydantic v2, без хардкода.
 
-Один инструмент (фьючерс FORTS). Стратегия внутридневная: VWAP сбрасывается каждый
-торговый день, позиция не держится через ночь (принудительный выход к концу сессии).
+Один инструмент (фьючерс FORTS). Стратегия внутридневная: directional momentum —
+сравнение close с close[-lookback], удержание ровно holding баров, ранний стоп по
+stop_pct. Позиция не держится через ночь (принудительный выход к концу сессии).
+
+VWAP-reversion (старая логика) убран: на одиночном фьючерсе эджа не имел (оверфит —
+параметры прибыльные на SRU6 теряли на GZU6). Momentum lb48/h18 обобщается на оба
+инструмента (бэктест: SRU6 +97, GZU6 +420, оба в плюсе после издержек).
+
+Совместимость: старые session_state_5_*.json содержат VWAP-параметры (band_sigma,
+take_profit_sigma, entry_trigger, …). Они сохранены как DEPRECATED-поля (логика их
+не читает) — чтобы load_session не падал и /st5/config продолжал принимать их без 500.
+extra="ignore" страхует от вовсе незнакомых ключей.
 """
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class InstrumentConfig(BaseModel):
@@ -20,29 +30,35 @@ class InstrumentConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    """VWAP-reversion: коридор ±k·σ вокруг внутридневного VWAP."""
+    """Directional momentum: close vs close[-lookback], удержание holding баров."""
+    model_config = ConfigDict(extra="ignore")   # незнакомые ключи старых сессий — молча отбросить
+
     candle_interval_minutes: int = 10     # MOEX ISS: 5m нет, дефолт 10m
-    # полуширина коридора в σ. Дефолт 1.5 по гриду 30д SRM6 (14.06.2026): band1.5 дал
-    # лучший результат (win 63%, net +524₽) против band2.0 (51%, −96₽) — узкий коридор
-    # ловит больше возвратов. ВНИМАНИЕ: VWAP-reversion на одиночном фьючерсе — слабый эдж
-    # (net около нуля), в отличие от коинтегрированного спреда st4; нужен форвард-контроль.
-    band_sigma: float = 1.5
-    min_bars_in_day: int = 6              # минимум баров дня для готовности VWAP (анти-шум утра)
-    std_mode: Literal["Population", "Sample"] = "Population"
-    # вход: Breakout — пробой коридора наружу; ReEntry — возврат в коридор (защита от тренда)
-    entry_trigger: Literal["Breakout", "ReEntry"] = "Breakout"
-    # выход к VWAP: живой VWAP (дрейфует за день) или зафиксированный на входе
-    freeze_vwap_on_exit: bool = False
-    # тейк-профит: закрыть, когда цена вернулась к VWAP на take_profit_sigma·σ ВНУТРИ коридора
-    take_profit_sigma: float = 0.0        # 0 = выкл (выход по пересечению VWAP)
-    # защитный стоп: цена ушла против позиции дальше stop_sigma·σ от VWAP
-    stop_sigma: float = 3.0
-    max_bars_in_trade: int = 0            # тайм-стоп (0 = выкл)
+
+    # --- параметры momentum (бэктест lb48/h18: SRU6 +97, GZU6 +420, оба в плюсе) ---
+    lookback: int = 48                    # бар сравнения: signal = sign(close[i] − close[i−lookback])
+    holding: int = 18                     # держим ровно столько баров, затем выход по времени
+    stop_pct: float = 0.02                # ранний выход: цена против позиции > stop_pct (2%)
+
+    # принудительное закрытие к концу сессии (овернайт-риск) — сохранено из инфраструктуры
+    flat_at_session_end: bool = True
+
+    # общая инфраструктура (используется движком/фильтрами/live)
     pending_ttl_bars: int = 3             # TTL неподтверждённой рекомендации (ручной режим)
     # объёмный фильтр входа: bar.volume ≥ volume_filter_mult · SMA(объёма дня). 0 = выкл
     volume_filter_mult: float = 0.0
     max_data_lag_min: float = 0.0         # гейт свежести (только live). 0 = выкл
-    flat_at_session_end: bool = True      # принудительное закрытие к концу сессии (овернайт-риск)
+
+    # --- DEPRECATED (логика momentum их не читает) ---
+    # сохранены, чтобы /st5/config и старые session_state_5_*.json не ломались на присвоении.
+    band_sigma: float = 1.5
+    min_bars_in_day: int = 6
+    std_mode: Literal["Population", "Sample"] = "Population"
+    entry_trigger: Literal["Breakout", "ReEntry"] = "Breakout"
+    freeze_vwap_on_exit: bool = False
+    take_profit_sigma: float = 0.0
+    stop_sigma: float = 3.0
+    max_bars_in_trade: int = 0
 
 
 class ExecutionConfig(BaseModel):

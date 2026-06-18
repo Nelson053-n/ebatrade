@@ -1,6 +1,6 @@
-"""Доменные модели st5 (VWAP-reversion на одиночном инструменте). Только структуры данных.
+"""Доменные модели st5 (directional momentum на одиночном инструменте). Только данные.
 
-st5 — НЕ парная стратегия: один фьючерс, отклонение цены от внутридневного VWAP.
+st5 — НЕ парная стратегия: один фьючерс, направленный momentum (close vs close[-lookback]).
 Position — одна нога (лонг/шорт), не пара. Терминология намеренно отличается от st4.
 """
 from __future__ import annotations
@@ -21,9 +21,9 @@ class BotState(str, Enum):
 
 class Signal(str, Enum):
     NONE = "none"
-    BUY = "buy"     # лонг: цена ниже нижней полосы VWAP, ждём возврата вверх
-    SELL = "sell"   # шорт: цена выше верхней полосы VWAP, ждём возврата вниз
-    EXIT = "exit"   # возврат к VWAP / тейк / стоп / конец сессии
+    BUY = "buy"     # лонг: тренд вверх (close > close[-lookback]) — входим по тренду
+    SELL = "sell"   # шорт: тренд вниз (close < close[-lookback])
+    EXIT = "exit"   # выход по holding / стоп / конец сессии
 
 
 @dataclass(slots=True)
@@ -53,15 +53,30 @@ class PriceBar:
 
 
 @dataclass(slots=True)
-class VwapReading:
-    """Срез VWAP на закрытый бар: VWAP дня + коридор ±k·σ отклонений цены от VWAP."""
+class MomentumReading:
+    """Срез momentum на закрытый бар: текущий close vs close[-lookback] → направление.
+
+    signal: +1 (тренд вверх), −1 (тренд вниз), 0 (close == ref). is_ready — накоплено
+    > lookback закрытых баров (есть с чем сравнивать).
+    """
     ts: int
-    price: float               # close бара
+    price: float               # close текущего бара
+    ref_price: float           # close[-lookback] (база сравнения); nan пока не готов
+    signal: int                # +1 / −1 / 0
+    lookback_return: float     # (price − ref_price) / ref_price (доля); nan пока не готов
+    is_ready: bool
+
+
+@dataclass(slots=True)
+class VwapReading:
+    """DEPRECATED (VWAP-reversion). Оставлен для совместимости старых импортов/тестов."""
+    ts: int
+    price: float
     vwap: float
-    sigma: float               # σ отклонений (price − vwap) с начала дня
+    sigma: float
     upper: float
     lower: float
-    is_ready: bool             # накоплено ≥ min_bars баров текущего дня
+    is_ready: bool
 
 
 @dataclass(slots=True)
@@ -72,7 +87,7 @@ class Position:
     lots: int
     entry_price: float
     entry_ts: int
-    entry_vwap: float          # VWAP на входе (для freeze-выхода)
+    entry_vwap: float          # сохранено как имя поля персиста; здесь = close[-lookback] на входе
     entry_fee_rub: float = 0.0
 
 

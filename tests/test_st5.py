@@ -1,11 +1,13 @@
-"""Юнит-тесты st5 (VWAP-reversion на одиночном инструменте).
+"""Юнит-тесты st5 (directional momentum на одиночном инструменте).
 
-Покрывают: внутридневной VWAP (сброс по дню, σ), сигналы вход/выход, знак P&L,
-тейк/стоп/тайм-стоп, дневной kill-switch с нереализованным, flat-at-session-end,
-объёмный фильтр, персист позиции.
+Покрывают: индикатор momentum (готовность по lookback, направление сигнала),
+объёмный SMA, сигналы вход (по тренду) / выход (holding, стоп), знак P&L, FSM-ветки
+движка (вход LONG/SHORT, выход по holding/стопу, flat-at-session-end, дневной
+kill-switch), объёмный фильтр, бэктест, обратная совместимость со старым VWAP-конфигом.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -14,8 +16,9 @@ from pairsignal.st5 import data_feed as feed
 from pairsignal.st5.backtest import run_backtest, vwap_frame_for_chart
 from pairsignal.st5.config import St5Config
 from pairsignal.st5.engine import TradingEngine, _pnl_rub
-from pairsignal.st5.indicators import IntradayVwap, VolumeAverage
-from pairsignal.st5.models import BotState, PriceBar, Signal, VwapReading
+from pairsignal.st5.indicators import MomentumIndicator, VolumeAverage
+from pairsignal.st5.models import BotState, MomentumReading, Position, PriceBar, Signal
+from pairsignal.st5.service import St5Session
 from pairsignal.st5.strategy import entry_signal, exit_signal, is_session_end
 
 _MSK = timezone(timedelta(hours=3))
@@ -35,40 +38,49 @@ def _bar(ts: int, close: float, vol: float = 100.0, hl: float = 5.0) -> PriceBar
     return PriceBar(ts, close, close + hl, close - hl, close, vol)
 
 
-def _vr(ts, price, vwap, sigma, k=2.0, ready=True) -> VwapReading:
-    return VwapReading(ts, price, vwap, sigma, vwap + k * sigma, vwap - k * sigma, ready)
+def _mr(price, ref, ready=True) -> MomentumReading:
+    sig = 1 if price > ref else (-1 if price < ref else 0)
+    ret = (price - ref) / ref if ref else 0.0
+    return MomentumReading(ts=0, price=price, ref_price=ref, signal=sig,
+                           lookback_return=ret, is_ready=ready)
 
 
-# ============================ индикатор VWAP ============================
-
-def test_vwap_matches_manual():
-    """VWAP = Σ(typical·vol)/Σvol по барам дня."""
-    vw = IntradayVwap(band_sigma=2.0, min_bars=1)
-    day = "2026-06-10"
-    bars = [_bar(_ts(day, 10, 0), 100, vol=10),
-            _bar(_ts(day, 10, 10), 110, vol=30)]
-    vw.update(bars[0])
-    r2 = vw.update(bars[1])
-    # typical = close (т.к. hl симметричен): t1=100, t2=110
-    exp = (100 * 10 + 110 * 30) / 40
-    assert r2.vwap == pytest.approx(exp, abs=1e-9)
+def _pos(state: BotState, entry: float) -> Position:
+    side = "buy" if state == BotState.LONG else "sell"
+    return Position(state=state, side=side, lots=1, entry_price=entry,
+                    entry_ts=0, entry_vwap=entry, entry_fee_rub=0.0)
 
 
-def test_vwap_resets_each_day():
-    """VWAP сбрасывается на новый торговый день (MSK)."""
-    vw = IntradayVwap(band_sigma=2.0, min_bars=1)
-    vw.update(_bar(_ts("2026-06-10", 12, 0), 100, vol=100))
-    r = vw.update(_bar(_ts("2026-06-11", 10, 0), 200, vol=100))
-    assert r.vwap == pytest.approx(200, abs=1e-6)   # новый день → только текущий бар
+# ============================ индикатор momentum ============================
+
+def test_momentum_not_ready_below_lookback():
+    """is_ready только когда накоплено > lookback закрытых баров."""
+    mom = MomentumIndicator(lookback=3)
+    for c in (100, 101, 102):           # 3 бара — пока нет close[-3]
+        assert not mom.update(c).is_ready
+    assert mom.update(103).is_ready      # 4-й бар: есть с чем сравнивать
 
 
-def test_vwap_not_ready_below_min_bars():
-    vw = IntradayVwap(band_sigma=2.0, min_bars=6)
-    day = "2026-06-10"
-    for i in range(5):
-        r = vw.update(_bar(_ts(day, 10, i * 10), 100 + i))
-        assert not r.is_ready
-    assert vw.update(_bar(_ts(day, 11, 0), 105)).is_ready
+def test_momentum_direction_up():
+    """close > close[-lookback] → signal +1, корректный lookback_return."""
+    mom = MomentumIndicator(lookback=2)
+    mom.update(100)
+    mom.update(100)
+    r = mom.update(110)                  # сравнение с close[-2] = 100
+    assert r.is_ready
+    assert r.signal == 1
+    assert r.ref_price == pytest.approx(100)
+    assert r.lookback_return == pytest.approx(0.10)
+
+
+def test_momentum_direction_down_and_flat():
+    mom = MomentumIndicator(lookback=2)
+    mom.update(100)
+    mom.update(100)
+    assert mom.update(90).signal == -1   # вниз
+    mom2 = MomentumIndicator(lookback=1)
+    mom2.update(100)
+    assert mom2.update(100).signal == 0  # равно → флэт
 
 
 def test_volume_average_resets_daily():
@@ -81,31 +93,37 @@ def test_volume_average_resets_daily():
 
 # ============================ сигналы ============================
 
-def test_entry_breakout():
-    cfg = St5Config().strategy
-    # цена пробила нижнюю полосу вниз → BUY (ждём возврата вверх)
-    assert entry_signal(_vr(0, 95, 100, 5), _vr(1, 89, 100, 5), cfg) == Signal.BUY
-    # пробила верхнюю → SELL
-    assert entry_signal(_vr(0, 105, 100, 5), _vr(1, 111, 100, 5), cfg) == Signal.SELL
-    # внутри коридора → нет сигнала
-    assert entry_signal(_vr(0, 100, 100, 5), _vr(1, 102, 100, 5), cfg) == Signal.NONE
+def test_entry_follows_trend():
+    # тренд вверх → BUY (вход в направлении)
+    assert entry_signal(_mr(110, 100)) == Signal.BUY
+    # тренд вниз → SELL
+    assert entry_signal(_mr(90, 100)) == Signal.SELL
+    # флэт → нет сигнала
+    assert entry_signal(_mr(100, 100)) == Signal.NONE
+    # индикатор не готов → нет сигнала
+    assert entry_signal(_mr(110, 100, ready=False)) == Signal.NONE
 
 
-def test_entry_reentry():
-    cfg = St5Config().strategy
-    cfg.entry_trigger = "ReEntry"
-    # была выше верхней (111≥110), вернулась внутрь (108<110) → SELL
-    assert entry_signal(_vr(0, 111, 100, 5), _vr(1, 108, 100, 5), cfg) == Signal.SELL
-    # пробой наружу в ReEntry сигнала не даёт
-    assert entry_signal(_vr(0, 105, 100, 5), _vr(1, 111, 100, 5), cfg) == Signal.NONE
+def test_exit_by_holding():
+    pos = _pos(BotState.LONG, 100.0)
+    # держим < holding → не выходим
+    assert exit_signal(pos, 5, 101.0, holding=18, stop_pct=0.02) == (False, "")
+    # bars_held >= holding → выход по времени
+    ok, reason = exit_signal(pos, 18, 101.0, holding=18, stop_pct=0.02)
+    assert ok and reason == "time_stop"
 
 
-def test_exit_cross_vwap():
-    # LONG: цена пересекла VWAP снизу вверх → выход
-    assert exit_signal(BotState.LONG, _vr(0, 95, 100, 5), _vr(1, 101, 100, 5), 100)
-    assert not exit_signal(BotState.LONG, _vr(0, 95, 100, 5), _vr(1, 98, 100, 5), 100)
-    # SHORT: сверху вниз
-    assert exit_signal(BotState.SHORT, _vr(0, 105, 100, 5), _vr(1, 99, 100, 5), 100)
+def test_exit_by_stop():
+    # LONG: цена упала на >2% от входа → ранний стоп
+    pos = _pos(BotState.LONG, 100.0)
+    ok, reason = exit_signal(pos, 1, 97.0, holding=18, stop_pct=0.02)
+    assert ok and reason == "stop"
+    # SHORT: цена выросла на >2% → стоп
+    sp = _pos(BotState.SHORT, 100.0)
+    ok, reason = exit_signal(sp, 1, 103.0, holding=18, stop_pct=0.02)
+    assert ok and reason == "stop"
+    # цена в пределах stop_pct и держим < holding → не выходим
+    assert exit_signal(pos, 1, 99.0, holding=18, stop_pct=0.02) == (False, "")
 
 
 def test_session_end_predicate():
@@ -114,88 +132,126 @@ def test_session_end_predicate():
     assert not is_session_end(_ts("2026-06-10", 15, 0), cfg)
 
 
-# ============================ P&L и движок ============================
+# ============================ P&L ============================
 
 def test_pnl_sign():
     spec = _spec()
-    # лонг заработал при росте
-    assert _pnl_rub("buy", 100, 110, 1, spec) == pytest.approx(10.0)
-    # шорт заработал при падении
-    assert _pnl_rub("sell", 100, 90, 1, spec) == pytest.approx(10.0)
-    # шорт потерял при росте
-    assert _pnl_rub("sell", 100, 110, 1, spec) == pytest.approx(-10.0)
+    assert _pnl_rub("buy", 100, 110, 1, spec) == pytest.approx(10.0)   # лонг + рост
+    assert _pnl_rub("sell", 100, 90, 1, spec) == pytest.approx(10.0)   # шорт + падение
+    assert _pnl_rub("sell", 100, 110, 1, spec) == pytest.approx(-10.0)  # шорт + рост
 
 
-def _warm_day(eng, day, base=32000.0, n=10):
-    """Прогреть день колебанием вокруг base (σ>0, VWAP готов)."""
-    ts0 = _ts(day, 10, 0)
-    iv = eng.cfg.strategy.candle_interval_minutes * 60_000
-    for i in range(n):
-        noise = 8.0 if i % 2 == 0 else -8.0
-        eng.step(_bar(ts0 + i * iv, base + noise))
-    return ts0 + n * iv, iv
+# ============================ движок (FSM) ============================
 
-
-def test_long_profits_when_price_returns_up():
-    """BUY (цена под VWAP) зарабатывает при возврате цены вверх к VWAP."""
+def _cfg(lookback=3, holding=4, stop_pct=0.02, flat=False):
     cfg = St5Config()
-    cfg.strategy.min_bars_in_day = 5
-    cfg.strategy.flat_at_session_end = False
-    cfg.strategy.stop_sigma = 0.0
-    eng = TradingEngine(cfg, _spec())
-    ts, iv = _warm_day(eng, "2026-06-10", n=10)
-    # резкий провал цены вниз за нижнюю полосу → BUY
-    eng.step(_bar(ts, 32000 - 80))
-    ts += iv
+    cfg.strategy.lookback = lookback
+    cfg.strategy.holding = holding
+    cfg.strategy.stop_pct = stop_pct
+    cfg.strategy.flat_at_session_end = flat
+    return cfg
+
+
+def _feed(eng, day, prices, hh0=10):
+    """Прогнать список close по барам дня; вернуть (последний ts, шаг)."""
+    ts0 = _ts(day, hh0, 0)
+    iv = eng.cfg.strategy.candle_interval_minutes * 60_000
+    last = None
+    for i, c in enumerate(prices):
+        last = eng.step(_bar(ts0 + i * iv, c))
+    return ts0 + (len(prices) - 1) * iv, iv, last
+
+
+def test_long_entry_on_uptrend_and_profit():
+    """Рост close[i] > close[i-lookback] → вход LONG; рост дальше → P&L > 0."""
+    eng = TradingEngine(_cfg(lookback=3, holding=10), _spec())
+    # 4 бара прогрева (lookback=3 → готов на 4-м), затем растущий тренд → BUY
+    eng.step(_bar(_ts("2026-06-10", 10, 0), 32000))
+    eng.step(_bar(_ts("2026-06-10", 10, 10), 32000))
+    eng.step(_bar(_ts("2026-06-10", 10, 20), 32000))
+    eng.step(_bar(_ts("2026-06-10", 10, 30), 32010))   # 32010 > close[-3]=32000 → LONG
     assert eng.state == BotState.LONG
+    assert eng.position.side == "buy"
     entry = eng.position.entry_price
-    # цена возвращается вверх через VWAP → выход в плюс
-    eng.step(_bar(ts, 32010))
+    # цена растёт → закрытие через holding в плюс
+    ts = _ts("2026-06-10", 10, 40)
+    for i in range(12):
+        eng.step(_bar(ts + i * 600_000, 32050 + i * 5))
+        if eng.state == BotState.FLAT:
+            break
     assert len(eng.trades) == 1
     t = eng.trades[0]
     assert t.exit_price > entry
     assert t.gross_pnl_rub > 0
 
 
-def test_session_end_forces_flat():
-    cfg = St5Config()
-    cfg.strategy.min_bars_in_day = 5
-    eng = TradingEngine(cfg, _spec())
-    ts, iv = _warm_day(eng, "2026-06-10", n=10)
-    eng.step(_bar(ts, 32000 - 80))      # вход BUY
+def test_short_entry_on_downtrend():
+    """Падение close[i] < close[i-lookback] → вход SHORT."""
+    eng = TradingEngine(_cfg(lookback=3, holding=10), _spec())
+    _feed(eng, "2026-06-10", [32000, 32000, 32000, 31990])   # 31990 < close[-3] → SHORT
+    assert eng.state == BotState.SHORT
+    assert eng.position.side == "sell"
+
+
+def test_exit_by_holding_closes_position():
+    """Позиция держится ровно holding баров, затем выход по времени."""
+    eng = TradingEngine(_cfg(lookback=2, holding=3, stop_pct=0.0), _spec())
+    _feed(eng, "2026-06-10", [32000, 32000, 32010])   # вход LONG на 3-м баре
     assert eng.state == BotState.LONG
-    # бар у конца сессии (23:45) → принудительное закрытие
-    eng.step(_bar(_ts("2026-06-10", 23, 45), 31950))
+    ts = _ts("2026-06-10", 11, 0)
+    iv = 600_000
+    # держим: bars_held инкрементится каждый шаг; на 3-м шаге в позиции — выход
+    for i in range(5):
+        eng.step(_bar(ts + i * iv, 32010))
+        if eng.state == BotState.FLAT:
+            break
+    assert len(eng.trades) == 1
+    assert eng.trades[0].reason == "time_stop"
+    assert eng.trades[0].bars_held == 3
+
+
+def test_exit_by_stop_closes_position():
+    """Цена против LONG более чем на stop_pct → ранний выход по стопу."""
+    eng = TradingEngine(_cfg(lookback=2, holding=100, stop_pct=0.01), _spec())
+    _feed(eng, "2026-06-10", [32000, 32000, 32010])   # вход LONG
+    assert eng.state == BotState.LONG
+    entry = eng.position.entry_price
+    # обвал на >1% от входа → стоп
+    eng.step(_bar(_ts("2026-06-10", 12, 0), entry * 0.98))
+    assert eng.state == BotState.FLAT
+    assert eng.trades[-1].reason == "stop"
+    assert eng.trades[-1].gross_pnl_rub < 0
+
+
+def test_session_end_forces_flat():
+    eng = TradingEngine(_cfg(lookback=2, holding=100, flat=True), _spec())
+    _feed(eng, "2026-06-10", [32000, 32000, 32010])   # вход LONG
+    assert eng.state == BotState.LONG
+    eng.step(_bar(_ts("2026-06-10", 23, 45), 32010))  # конец сессии
     assert eng.state == BotState.FLAT
     assert eng.trades[-1].reason == "eod"
 
 
 def test_day_loss_kill_switch():
-    cfg = St5Config()
-    cfg.strategy.min_bars_in_day = 5
-    cfg.strategy.flat_at_session_end = False
+    cfg = _cfg(lookback=2, holding=100, stop_pct=0.0)
     cfg.risk.max_daily_loss_rub = 50.0
     eng = TradingEngine(cfg, _spec())
-    ts, iv = _warm_day(eng, "2026-06-10", n=10)
-    eng.step(_bar(ts, 32000 - 80))   # BUY
-    ts += iv
+    _feed(eng, "2026-06-10", [32000, 32000, 32010])   # вход LONG
     assert eng.state == BotState.LONG
-    # цена падает ещё дальше против лонга → unrealized < −50 → HALTED
-    eng.step(_bar(ts, 32000 - 400))
+    # цена резко против лонга → unrealized < −50 → HALTED
+    eng.step(_bar(_ts("2026-06-10", 12, 0), 32010 - 400))
     assert eng.state == BotState.HALTED
     assert eng.risk.halted
 
 
 def test_volume_filter_blocks_low():
-    cfg = St5Config()
-    cfg.strategy.min_bars_in_day = 5
-    cfg.strategy.flat_at_session_end = False
+    cfg = _cfg(lookback=2, holding=10)
     cfg.strategy.volume_filter_mult = 2.0
     eng = TradingEngine(cfg, _spec())
-    # прогрев со средним объёмом 100
-    ts, iv = _warm_day(eng, "2026-06-10", n=10)
-    # пробой на НИЗКОМ объёме (10 << 2·100) → вход заблокирован
-    res = eng.step(_bar(ts, 32000 - 80, vol=10))
+    eng.step(_bar(_ts("2026-06-10", 10, 0), 32000, vol=100))
+    eng.step(_bar(_ts("2026-06-10", 10, 10), 32000, vol=100))
+    # сигнал на тренде, но НИЗКИЙ объём (10 << 2·~100) → вход заблокирован
+    res = eng.step(_bar(_ts("2026-06-10", 10, 20), 32010, vol=10))
     assert eng.state == BotState.FLAT
     assert any("объём" in e.message for e in res.events)
 
@@ -204,6 +260,8 @@ def test_volume_filter_blocks_low():
 
 def test_backtest_synthetic_runs():
     cfg = St5Config()
+    cfg.strategy.lookback = 12          # синтетика ~800 баров — короче lookback
+    cfg.strategy.holding = 6
     df = feed.generate_synthetic(n=800)
     r = run_backtest(df, cfg, feed.synthetic_spec())
     assert r["bars"] == 800
@@ -212,3 +270,39 @@ def test_backtest_synthetic_runs():
     assert r["net_pnl_rub"] == pytest.approx(
         sum(t["net_pnl_rub"] for t in r["trades_detail"]), abs=1)
     assert len(vwap_frame_for_chart(df, cfg)) > 0
+
+
+# ============================ совместимость ============================
+
+def test_load_session_ignores_old_vwap_config(tmp_path, monkeypatch):
+    """Старый session_state_5_*.json с VWAP-параметрами не должен ронять load."""
+    s = St5Session("sber")
+    old = {
+        "session_started": 1_700_000_000.0,
+        "balance_rub": 999_000.0,
+        "trades": [],
+        "history": [],
+        # старый VWAP-конфиг + вовсе незнакомый ключ
+        "config": {"strategy": {"band_sigma": 1.5, "take_profit_sigma": 0.5,
+                                 "entry_trigger": "ReEntry", "totally_unknown": 42}},
+        "spec": {"code": "SRU6", "tick_size": 1.0, "tick_value_rub": 1.0,
+                 "lot": 1, "expiry": None},
+        "position": None, "halted": False,
+    }
+    s._session_file.write_text(json.dumps(old))
+    assert s.load_session() is True
+    assert s.engine.balance_rub == pytest.approx(999_000.0)
+    # momentum-дефолты на месте
+    assert s.cfg.strategy.lookback == 48
+    assert s.cfg.strategy.holding == 18
+    s._session_file.unlink(missing_ok=True)
+
+
+def test_snapshot_has_momentum_fields():
+    s = St5Session("sber")
+    snap = s.snapshot(0.0)
+    for key in ("lookback", "holding", "stop_pct", "cur_signal",
+                "wait_reason", "summary", "history", "events", "strategy_name"):
+        assert key in snap
+    assert snap["lookback"] == 48
+    assert "Momentum" in snap["strategy_name"]

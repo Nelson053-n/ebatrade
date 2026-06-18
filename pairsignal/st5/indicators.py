@@ -1,19 +1,53 @@
-"""VWAP-индикатор st5: внутридневной VWAP + коридор ±k·σ отклонений цены от VWAP.
+"""Индикаторы st5.
 
-VWAP сбрасывается каждый ТОРГОВЫЙ ДЕНЬ (день сессии FORTS в TZ MSK): копит Σ(typical·vol)
-и Σvol с начала дня. Коридор строится на σ отклонений (price − vwap) текущего дня —
-аналог BB, но якорь дрейфует к концу дня (нормально: VWAP — внутридневной ориентир).
+Основной — MomentumIndicator: буфер закрытий, на каждом баре сравнивает текущий close
+с close[-lookback] и выдаёт направление сигнала. Все расчёты — по ЗАКРЫТЫМ свечам (no
+repaint): сигнал считается только после полного бара, сравнение — с уже закрытым баром.
 
-Все расчёты — по закрытым свечам (no repaint).
+IntradayVwap/VolumeAverage оставлены DEPRECATED для совместимости (логика их не вызывает).
 """
 from __future__ import annotations
 
 import math
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from .models import PriceBar, VwapReading
+from .models import MomentumReading, PriceBar, VwapReading
 
 _MSK = timezone(timedelta(hours=3))   # сессия FORTS в МСК (день VWAP считаем по ней)
+
+
+class MomentumIndicator:
+    """Потоковый directional momentum: close[i] vs close[i−lookback].
+
+    Держит кольцевой буфер последних (lookback+1) закрытий. На баре i:
+      signal = +1, если close[i] > close[i−lookback] (тренд вверх → LONG);
+      signal = −1, если close[i] < close[i−lookback] (тренд вниз → SHORT);
+      signal =  0, если равны.
+    is_ready — когда накоплено > lookback баров (есть close[i−lookback] для сравнения).
+    Без дневного сброса: momentum внутридневной по баровому окну, а не по якорю дня.
+    """
+
+    def __init__(self, lookback: int = 48) -> None:
+        self.lookback = max(1, int(lookback))
+        # храним lookback+1 закрытий: текущий + тот, что lookback баров назад
+        self._closes: deque[float] = deque(maxlen=self.lookback + 1)
+
+    @property
+    def is_ready(self) -> bool:
+        return len(self._closes) > self.lookback
+
+    def update(self, close: float) -> MomentumReading:
+        """Добавить close закрытого бара, вернуть срез momentum (после добавления)."""
+        self._closes.append(close)
+        if not self.is_ready:
+            return MomentumReading(ts=0, price=close, ref_price=float("nan"),
+                                   signal=0, lookback_return=float("nan"), is_ready=False)
+        ref = self._closes[0]          # close[-lookback] (буфер длиной lookback+1)
+        signal = 1 if close > ref else (-1 if close < ref else 0)
+        ret = (close - ref) / ref if ref else 0.0
+        return MomentumReading(ts=0, price=close, ref_price=ref, signal=signal,
+                               lookback_return=ret, is_ready=True)
 
 
 def _day_key(ts_ms: int) -> str:
@@ -22,7 +56,7 @@ def _day_key(ts_ms: int) -> str:
 
 
 class IntradayVwap:
-    """Потоковый внутридневной VWAP + σ отклонений. Сбрасывается на новый день.
+    """DEPRECATED (VWAP-reversion). Потоковый внутридневной VWAP + σ отклонений.
 
     band_sigma — полуширина коридора. min_bars — сколько баров дня нужно, чтобы σ была
     осмысленной (утренний шум на 1-2 барах даёт вырожденный коридор → is_ready=False).

@@ -1,7 +1,8 @@
-"""Бэктест st5: офлайн-прогон VWAP-reversion на исторических OHLCV-свечах.
+"""Бэктест st5: офлайн-прогон directional momentum на исторических OHLCV-свечах.
 
 Честный отчёт: число сделок, win-rate, P&L, max-DD по equity (с нереализованным),
-средние держание/проскальзывание, кривая капитала.
+средние держание/проскальзывание, кривая капитала. Сигнатура и ключи результата —
+прежние (инфраструктура вкладки/мониторинга не меняется).
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import pandas as pd
 
 from .config import St5Config
 from .engine import TradingEngine
-from .indicators import IntradayVwap
+from .indicators import MomentumIndicator
 from .models import InstrumentSpec, PriceBar
 
 
@@ -67,17 +68,19 @@ def _trade_dict(t) -> dict:
 
 
 def vwap_frame_for_chart(df: pd.DataFrame, cfg: St5Config) -> list[dict]:
-    """Цена + VWAP + коридор по всему df для графика вкладки (прогрев → отброшен)."""
-    vw = IntradayVwap(cfg.strategy.band_sigma, cfg.strategy.min_bars_in_day,
-                      cfg.strategy.std_mode)
+    """Кадр графика вкладки: close + momentum-сигнал по всему df (прогрев → отброшен).
+
+    Имя функции сохранено (импортируется в api.py). Поля под momentum: close, ref_price
+    (close[-lookback]), signal (+1/−1/0), lookback_return (%).
+    """
+    mom = MomentumIndicator(cfg.strategy.lookback)
     out = []
     for ts, row in df.iterrows():
-        bar = PriceBar(int(ts), float(row["open"]), float(row["high"]), float(row["low"]),
-                       float(row["close"]), float(row.get("volume", 0.0)))
-        r = vw.update(bar)
+        close = float(row["close"])
+        r = mom.update(close)
         if not r.is_ready:
             continue
-        out.append({"ts": int(ts), "price": round(r.price, 1), "vwap": round(r.vwap, 1),
-                    "upper": round(r.upper, 1), "lower": round(r.lower, 1),
-                    "sigma": round(r.sigma, 1)})
+        out.append({"ts": int(ts), "price": round(r.price, 1),
+                    "ref_price": round(r.ref_price, 1), "signal": r.signal,
+                    "lookback_return": round(r.lookback_return * 100, 3)})
     return out

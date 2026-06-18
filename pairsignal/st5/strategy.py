@@ -1,54 +1,52 @@
-"""Сигнальная логика st5: пробой коридора VWAP → вход, возврат к VWAP → выход.
+"""Сигнальная логика st5: directional momentum → вход по тренду, выход по времени/стопу.
 
-Чистые функции от (prev, cur) → сигнал. Не знают про позиции/исполнение. Сигналы — только
-на закрытии бара и только когда VWAP.is_ready (накоплено ≥ min_bars дня).
+Чистые функции. Не знают про позиции/исполнение. Сигнал входа — только на закрытии бара
+и только когда индикатор готов (накоплено > lookback закрытых баров).
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from .config import SessionConfig, StrategyConfig
-from .models import BotState, Signal, VwapReading
+from .config import SessionConfig
+from .models import BotState, MomentumReading, Position, Signal
 
 
-def entry_signal(prev: VwapReading, cur: VwapReading, cfg: StrategyConfig) -> Signal:
-    """Сигнал входа на возврат к VWAP.
+def entry_signal(cur: MomentumReading) -> Signal:
+    """Сигнал входа по направлению momentum.
 
-    Breakout: цена пробила коридор НАРУЖУ → ставка на возврат.
-      BUY: цена ниже нижней полосы (prev > lower, cur <= lower) — ждём роста к VWAP.
-      SELL: цена выше верхней полосы (prev < upper, cur >= upper) — ждём падения к VWAP.
-    ReEntry: цена была снаружи и ВЕРНУЛАСЬ в коридор (защита от трендового пробоя).
+    close > close[-lookback] (signal +1) → BUY (вход в тренд вверх).
+    close < close[-lookback] (signal −1) → SELL (вход в тренд вниз).
+    Равенство (signal 0) или индикатор не готов → нет сигнала.
     """
-    if not (cur.is_ready and prev.is_ready):
+    if not cur.is_ready:
         return Signal.NONE
-    if cfg.entry_trigger == "ReEntry":
-        # была выше верхней, вернулась внутрь → SELL (ждём дальнейшего возврата к VWAP)
-        if prev.price >= prev.upper and cur.price < cur.upper:
-            return Signal.SELL
-        if prev.price <= prev.lower and cur.price > cur.lower:
-            return Signal.BUY
-        return Signal.NONE
-    # Breakout
-    if prev.price < prev.upper and cur.price >= cur.upper:
-        return Signal.SELL
-    if prev.price > prev.lower and cur.price <= cur.lower:
+    if cur.signal > 0:
         return Signal.BUY
+    if cur.signal < 0:
+        return Signal.SELL
     return Signal.NONE
 
 
-def exit_signal(state: BotState, prev: VwapReading, cur: VwapReading,
-                vwap_level: float) -> bool:
-    """Выход по пересечению VWAP. vwap_level — живой VWAP или зафиксированный на входе.
+def exit_signal(pos: Position, bars_held: int, price: float, holding: int,
+                stop_pct: float) -> tuple[bool, str]:
+    """Условие выхода из позиции (по закрытому бару).
 
-    LONG (вошли снизу): цена пересекла VWAP снизу вверх (prev < VWAP, cur >= VWAP).
-    SHORT (вошли сверху): цена пересекла VWAP сверху вниз (prev > VWAP, cur <= VWAP).
+    Возвращает (выходить?, причина). Приоритет: стоп → holding.
+      stop: цена ушла ПРОТИВ позиции более чем на stop_pct от цены входа.
+        LONG  — убыток при падении: (entry − price)/entry > stop_pct.
+        SHORT — убыток при росте:   (price − entry)/entry > stop_pct.
+      time: держим ровно holding баров (bars_held >= holding) → выход по времени.
     """
-    if state == BotState.LONG:
-        return prev.price < vwap_level and cur.price >= vwap_level
-    if state == BotState.SHORT:
-        return prev.price > vwap_level and cur.price <= vwap_level
-    return False
+    entry = pos.entry_price
+    if stop_pct > 0 and entry > 0:
+        if pos.state == BotState.LONG and (entry - price) / entry > stop_pct:
+            return True, "stop"
+        if pos.state == BotState.SHORT and (price - entry) / entry > stop_pct:
+            return True, "stop"
+    if holding > 0 and bars_held >= holding:
+        return True, "time_stop"
+    return False, ""
 
 
 def in_clearing_window(ts_ms: int, cfg: SessionConfig) -> bool:
