@@ -348,9 +348,11 @@ class St6Session:
         """Активировать sandbox-исполнение в live: создать исполнитель на текущую пару +
         reconciliation. Откат в paper (sandbox_error) при недоступности. Вызывается из run_live.
 
-        reconciliation: если на sandbox-счёте висят ноги текущей пары, а у нас позиции нет —
-        приводим счёт к FLAT (осиротевшие ноги); если позиция есть — оставляем (доверяем
-        восстановленному состоянию)."""
+        reconciliation: сверяем позицию движка с sandbox-счётом.
+        — на счёте ноги есть, у нас позиции нет → закрыть осиротевшие (счёт→FLAT);
+        — у нас позиция есть, на счёте её НЕТ → это paper-фантом (позиция открылась в
+          paper-режиме/на backfill до sandbox) → сбрасываем во FLAT, чтобы движок вошёл
+          заново реальным sandbox-ордером. Иначе движок «висит в позиции» и не торгует."""
         if self.cfg.connector.mode != "tbank_sandbox":
             self.state["sandbox_active"] = False
             return
@@ -367,11 +369,20 @@ class St6Session:
             return
         try:
             lots = self.executor.broker_lots()
-            if any(v != 0 for v in lots.values()) and not self.port.position.is_open:
+            on_account = any(v != 0 for v in lots.values())
+            have_pos = self.port.position.is_open
+            if on_account and not have_pos:
                 self.log_event("warn", f"reconciliation: на счёте висят {lots} "
                                "(локальной позиции нет) — закрываю")
                 if self.executor.flat_broker():
                     self.log_event("info", "reconciliation: счёт приведён к FLAT")
+            elif have_pos and not on_account:
+                # paper-фантом: позиция в движке, но реального ордера на счёте нет —
+                # сбрасываем, чтобы войти заново настоящим sandbox-ордером
+                self.log_event("warn", "reconciliation: локальная позиция не подтверждена "
+                               "sandbox-счётом (paper-фантом) — сброс во FLAT")
+                from .core import Position as _Pos
+                self.port.position = _Pos()
         except Exception as e:  # noqa: BLE001  сверка не должна ронять старт
             self.log_event("warn", f"reconciliation пропущена: {e}")
 
