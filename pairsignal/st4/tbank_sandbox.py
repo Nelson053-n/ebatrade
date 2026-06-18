@@ -113,7 +113,9 @@ def _call(service: str, method: str, body: dict, _retries: int = 3) -> dict:
     """POST к REST-gateway T-Bank. Возвращает JSON-ответ. Токен из env, не печатается.
 
     Ретраи на транзиентных сетевых обрывах (IncompleteRead/timeout) — крупные ответы вроде
-    Futures (~5МБ справочник) иногда обрываются до конца. HTTP-ошибки (401 и пр.) НЕ ретраим.
+    Futures (~5МБ справочник) иногда обрываются до конца. Также ретраим HTTP 429 (rate limit)
+    с экспоненциальным backoff — при одновременном старте нескольких sandbox-сессий ордера
+    упираются в лимит API. HTTP 401/400 и прочие НЕ ретраим (постоянные ошибки).
     """
     url = f"{_HOST}/{service}/{method}"
     data = json.dumps(body).encode("utf-8")
@@ -128,13 +130,18 @@ def _call(service: str, method: str, body: dict, _retries: int = 3) -> dict:
             with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx()) as r:  # noqa: S310
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            # 429 (rate limit) — транзиентная: ждём и ретраим (backoff растёт). Прочие HTTP — сразу.
+            if e.code == 429 and attempt < _retries - 1:
+                last_err = e
+                time.sleep(2.0 * (attempt + 1))
+                continue
             detail = e.read().decode("utf-8", "replace")[:400]
             raise TBankError(f"{method} → HTTP {e.code}: {detail}") from None
         except Exception as e:  # noqa: BLE001  IncompleteRead/URLError/timeout — ретраим
             last_err = e
             if attempt < _retries - 1:
                 time.sleep(1.5 * (attempt + 1))
-    raise TBankError(f"{method} → сеть недоступна после {_retries} попыток: {last_err}")
+    raise TBankError(f"{method} → запрос не прошёл после {_retries} попыток: {last_err}")
 
 
 def _q(units, nano=0) -> dict:
