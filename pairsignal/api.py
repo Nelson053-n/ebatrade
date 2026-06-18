@@ -376,6 +376,15 @@ def _st5(inst: str = "sber") -> St5Session:
     return ST5S[inst]
 
 
+# st6 — Correlation-Gated Pairs (парный mean-reversion + corr-гейт + динамический отбор пары).
+# Одна сессия "main" (корзина акций MOEX), paper-исполнение. Изолирована от прочих слотов.
+from .st6.service import get_session as _st6_get   # noqa: E402
+
+
+def _st6():
+    return _st6_get("main")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     for st in SLOTS:
@@ -395,6 +404,10 @@ async def lifespan(app: FastAPI):
         s5.load_session()
         if s5.state.pop("resume_live", False):
             asyncio.create_task(_st5_autoresume(s5))
+    _st6sess = _st6()
+    _st6sess.load_session()
+    if _st6sess.state.pop("resume_live", False):
+        asyncio.create_task(_st6_autoresume(_st6sess))
     _auto_bt_task = asyncio.create_task(_auto_backtest_loop())   # авто-бэктест раз в ~2.5 дня
     yield
     _auto_bt_task.cancel()
@@ -410,6 +423,10 @@ async def lifespan(app: FastAPI):
         s5.save_session()
         s5.state["live"] = False
         s5.state["player"] = False
+    _s6 = _st6()
+    _s6.save_session()
+    _s6.state["live"] = False
+    _s6.state["player"] = False
 
 
 app = FastAPI(title="pairsignal", version="0.1", lifespan=lifespan)
@@ -1868,3 +1885,126 @@ async def st5_tests():
             return {"passed": 0, "failed": 0, "ok": False, "error": str(e)}
 
     return await asyncio.to_thread(_run)
+
+
+# ============================================================================
+# st6 — Correlation-Gated Pairs. Парный mean-reversion с corr-гейтом и динамическим
+# отбором лучшей пары из корзины акций MOEX. Одна сессия "main", paper-исполнение.
+# ============================================================================
+
+@app.get("/st6/state")
+def st6_state():
+    return _st6().snapshot(_server_started)
+
+
+@app.get("/st6/config")
+def st6_config():
+    return _st6().cfg.model_dump()
+
+
+@app.post("/st6/config")
+def st6_set_config(payload: dict):
+    """Обновить параметры стратегии (z_entry/z_exit/z_stop, corr_enter/corr_break, окна,
+    risk_fraction, basket, timeframe). Paper — без потери журнала."""
+    s = _st6()
+    strat = payload.get("strategy") or {}
+    for k, v in strat.items():
+        if hasattr(s.cfg.strategy, k):
+            setattr(s.cfg.strategy, k, v)
+    for k in ("basket", "timeframe"):
+        if k in payload:
+            setattr(s.cfg, k, payload[k])
+    s.save_session()
+    return {"ok": True, "config": s.cfg.model_dump()}
+
+
+@app.post("/st6/control/start")
+async def st6_start():
+    """Запустить live (paper): отбор пары + поллинг MOEX ISS. Тяжёлый старт в фоне."""
+    s = _st6()
+    if s.state["live"]:
+        return {"ok": True, "already": True}
+    s.state["player"] = False
+    s.state["data_source"] = "live"
+    s.state["live"] = True
+    s.state["paused_by_user"] = False
+    s.log_event("info", "запуск live (paper)…")
+    asyncio.create_task(s.run_live())
+    return {"ok": True, "mode": "live", "starting": True}
+
+
+@app.post("/st6/control/stop")
+def st6_stop():
+    s = _st6()
+    s.state["live"] = False
+    s.state["paused_by_user"] = True
+    s.save_session()
+    return {"ok": True}
+
+
+@app.post("/st6/player/start")
+async def st6_player_start():
+    """Демо-плеер на синтетической коинтегрированной корзине (офлайн)."""
+    s = _st6()
+    if s.state["player"]:
+        return {"ok": True, "already": True}
+    s.state["live"] = False
+    s.state["paused_by_user"] = False
+    s.state["data_source"] = "synthetic"
+    s.state["player"] = True
+    asyncio.create_task(s.run_player())
+    return {"ok": True}
+
+
+@app.post("/st6/player/stop")
+def st6_player_stop():
+    s = _st6()
+    s.state["player"] = False
+    s.state["paused_by_user"] = True
+    return {"ok": True}
+
+
+@app.post("/st6/reset")
+def st6_reset():
+    s = _st6()
+    s.reset_engine()
+    s.save_session()
+    return {"ok": True}
+
+
+@app.get("/st6/trades")
+def st6_trades():
+    return {"trades": _st6().snapshot(_server_started).get("trades", [])}
+
+
+@app.get("/st6/tests")
+async def st6_tests():
+    """Статус юнит-тестов st6."""
+    import re
+    import subprocess
+    import sys
+
+    def _run() -> dict:
+        try:
+            p = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests/test_st6.py",
+                 "--no-header", "-p", "no:cacheprovider"],
+                cwd=str(_BASE), capture_output=True, text=True, timeout=180)
+            out = p.stdout + p.stderr
+            passed = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
+            failed = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
+            return {"passed": passed, "failed": failed, "ok": failed == 0 and passed > 0,
+                    "tail": out.strip().splitlines()[-1:] if out else []}
+        except Exception as e:  # noqa: BLE001
+            return {"passed": 0, "failed": 0, "ok": False, "error": str(e)}
+
+    return await asyncio.to_thread(_run)
+
+
+async def _st6_autoresume(s):
+    """Автостарт live (paper) после рестарта сервера — продолжаем сессию."""
+    s.state["player"] = False
+    s.state["data_source"] = "live"
+    s.state["live"] = True
+    s.log_event("info", "автовозобновление live после рестарта сервера")
+    await s.run_live()

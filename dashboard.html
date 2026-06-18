@@ -247,6 +247,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
       <button class="strat-btn" data-slot="3">st3</button>
       <button class="strat-btn" data-slot="4">st4</button>
       <button class="strat-btn" data-slot="5">st5</button>
+      <button class="strat-btn" data-slot="6">st6</button>
     </div>
     <div class="tag" id="hdr-tag">phase 1 · paper</div>
     <div class="pair" id="hdr-pair">BTC <span>÷</span> ETH</div>
@@ -679,6 +680,94 @@ tr:hover td{background:rgba(255,255,255,.015)}
     </div>
   </div>
 
+  <!-- ===== ПАНЕЛЬ st6: Correlation-Gated Pairs ===== -->
+  <div id="st6panel" style="display:none">
+    <div class="panel fade" style="margin-bottom:14px">
+      <h2 id="s6-title">st6 · Correlation-Gated Pairs <em>парный mean-reversion · корреляционный гейт · динамический отбор пары · paper</em></h2>
+      <details style="font-size:13px;line-height:1.75;color:var(--ink-dim)">
+        <summary style="cursor:pointer;color:var(--signal);font-weight:600;font-size:12px;user-select:none">ⓘ о стратегии</summary>
+        <div style="margin-top:10px">
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Идея.</b> Из корзины акций MOEX непрерывно отбирается лучшая пара по коинтеграции/корреляции (score). Торгуем возврат спреда <code>A − β·B</code> к среднему: при сильном z-отклонении входим против движения, выходим при возврате z к нулю. Корреляционный гейт пускает в сделку только пока пара статистически связана.</p>
+        <p style="margin:0 0 8px"><b style="color:var(--ink)">Механика.</b> z-score спреда: вход при <code>|z| ≥ z_entry</code> (лонг A / шорт B снизу, симметрично сверху), выход при <code>|z| ≤ z_exit</code>, стоп при <code>|z| ≥ z_stop</code>. Гейт: открываем только при <code>corr ≥ corr_enter</code>; если <code>corr &lt; corr_break</code> — связь распалась, выходим и ищем новую пару.</p>
+        <p style="margin:0;color:var(--warn)"><b>Честно:</b> режим <b>paper</b> — реальные ордера не выставляются. Индикаторы считаются только по закрытым свечам (no repaint). Динамический отбор пары — форвард-тест гипотезы, не гарантия доходности.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="grid2" style="display:grid;grid-template-columns:1.6fr 1fr;gap:14px;align-items:start">
+      <!-- LEFT -->
+      <div>
+        <div class="panel fade">
+          <h2>Текущая пара <em id="s6-pair-sub">отбор по коинтеграции из корзины</em></h2>
+          <div id="s6-pair" style="font-size:13px;line-height:1.8;color:var(--ink-dim)">отбор пары…</div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Спред · z-score <em id="s6-chart-sub">±z_entry / ±z_stop / 0</em></h2>
+          <div style="position:relative;height:320px"><canvas id="s6chart" style="width:100%;height:100%"></canvas></div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--ink-dim)">
+            <span><b style="color:var(--chart-line)">━</b> z-score</span>
+            <span><b style="color:var(--chart-band)">┄</b> ±z_entry</span>
+            <span><b style="color:var(--loss)">┄</b> ±z_stop</span>
+            <span><b style="color:var(--chart-mid)">━</b> 0</span>
+          </div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Журнал действий</h2>
+          <div class="jscroll" id="s6-events" style="max-height:150px;font-size:12px;line-height:1.7;color:var(--ink-dim)">—</div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Сделки</h2>
+          <div class="jscroll" style="max-height:240px"><table id="s6-trades">
+            <thead><tr><th>направл.</th><th>пара</th><th>z вх</th><th>держал</th><th>net ₽</th><th>причина</th></tr></thead>
+            <tbody></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- RIGHT -->
+      <div>
+        <div class="panel fade">
+          <h2>Статус</h2>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+            <span id="s6-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--ink-faint);box-shadow:0 0 8px currentColor"></span>
+            <span id="s6-status-txt" style="font-weight:600">—</span>
+          </div>
+          <div id="s6-status-sub" style="font-size:11px;color:var(--ink-dim);margin-top:5px;line-height:1.5">—</div>
+          <div id="s6-pos" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--line);font-size:12px;line-height:1.7"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+            <button class="ctrl-btn approve" id="s6-btn-live">▶ live</button>
+            <button class="ctrl-btn" id="s6-btn-player">демо</button>
+            <button class="ctrl-btn" id="s6-btn-stop">❚❚ стоп</button>
+            <button class="ctrl-btn" id="s6-btn-reset">сброс</button>
+          </div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;font-size:12px;color:var(--ink-dim)">
+            <span>z-score <b id="s6-ro-z" style="color:var(--ink)">—</b></span>
+            <span>corr <b id="s6-ro-corr" style="color:var(--ink)">—</b></span>
+            <span>β <b id="s6-ro-beta" style="color:var(--ink)">—</b></span>
+          </div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Результаты сессии</h2>
+          <div id="s6-summary" style="font-size:12px;line-height:1.9;color:var(--ink-dim)">—</div>
+        </div>
+
+        <div class="panel fade" style="margin-top:14px">
+          <h2>Параметры</h2>
+          <div class="params" style="margin-top:0;gap:12px">
+            <div class="fld"><label>z_entry</label><input id="s6-p-entry" type="number" step="0.1" min="0.5" style="width:70px"></div>
+            <div class="fld"><label>z_stop</label><input id="s6-p-stop" type="number" step="0.1" min="0" style="width:70px"></div>
+            <div class="fld"><label>corr_enter</label><input id="s6-p-corr" type="number" step="0.05" min="0" max="1" style="width:70px"></div>
+          </div>
+          <button class="ctrl-btn approve" id="s6-btn-apply" style="margin-top:12px">применить</button>
+          <span class="hint" id="s6-apply-msg" style="margin-left:10px"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ПАРНЫЙ LAYOUT st1/st2 (график, аналитика, журнал, параметры) — прячется на st3/st4/st5 -->
   <div id="pairlayout">
   <div class="grid">
@@ -890,7 +979,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
 /* ===== ПОДКЛЮЧЕНИЕ К BACKEND (api.py) ===== */
 const API = '';                      // тот же origin, что и панель
 const POLL_MS = 700;                 // период опроса /state
-let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v>=1&&v<=5)?v:1; }catch(e){ return 1; } })();
+let SLOT = (()=>{ try{ const v=+localStorage.getItem('slot'); return (v>=1&&v<=6)?v:1; }catch(e){ return 1; } })();
 let cfg = { entry_z:2.0, exit_z:0.2, stop_z:3.5, min_width_pct:2.0, risk_pct:2.0 };
 let snap = null;                     // последний ответ /state
 
@@ -1525,7 +1614,7 @@ function fmtDur(sec){
 function tickSession(){
   const el=$('pill-session');
   // на спец-вкладках показываем их сессию (свой снимок), иначе — слотовый snap
-  const src = SLOT===4 ? _s4snap : SLOT===5 ? _s5snap : snap;
+  const src = SLOT===4 ? _s4snap : SLOT===5 ? _s5snap : SLOT===6 ? _s6snap : snap;
   if(!src || !src.session_started){ el.textContent='сессия: —'; return; }
   const nowC=Date.now()/1000 + _clockSkew;
   el.textContent='сессия: '+fmtDur(nowC - src.session_started);
@@ -1538,14 +1627,15 @@ function markSlot(){
     b.classList.toggle('active', +b.dataset.slot===SLOT);
   });
   // st3 (momentum), st4 (спред SBRF/SBPR), st5 (VWAP) — отдельные панели; прячем парный layout
-  const isM = SLOT===3, isS4 = SLOT===4, isS5 = SLOT===5;
-  const special = isM || isS4 || isS5;
+  const isM = SLOT===3, isS4 = SLOT===4, isS5 = SLOT===5, isS6 = SLOT===6;
+  const special = isM || isS4 || isS5 || isS6;
   // весь парный layout st1/st2 (график, аналитика, журнал, параметры) обёрнут в #pairlayout —
   // прячем его целиком на спец-вкладках, чтобы не светились чужие BTC/ETH/SOL панели.
   $('pairlayout').style.display = special ? 'none' : '';
   $('st3panel').style.display = isM ? '' : 'none';
   $('st4panel').style.display = isS4 ? '' : 'none';
   $('st5panel').style.display = isS5 ? '' : 'none';
+  $('st6panel').style.display = isS6 ? '' : 'none';
 }
 // загрузить конфиг/пары/пресеты/тф и подключиться к сессии активного слота
 async function initSession(){
@@ -1585,6 +1675,7 @@ async function switchSlot(n){
   if(n===3){ momInit(); return; }
   if(n===4){ s4Init(); return; }
   if(n===5){ s5Init(); return; }
+  if(n===6){ s6Init(); return; }
   await initSession();
 }
 $('stratSwitch').querySelectorAll('.strat-btn').forEach(b=>{
@@ -2695,17 +2786,202 @@ function s5Init(){
   });
 }
 
+/* ===== ST6: CORRELATION-GATED PAIRS ===== */
+let _s6Started=false, _s6snap=null, _s6lastHist=null;
+function s6money(v){ return (v>=0?'+':'')+Math.round(v).toLocaleString('ru')+' ₽'; }
+async function s6api(path, method='GET', body=null){
+  const opt={method};
+  if(body!==null){ opt.headers={'Content-Type':'application/json'}; opt.body=JSON.stringify(body); }
+  const r=await fetch(API+'/st6'+path, opt);
+  if(!r.ok){ let d=''; try{d=(await r.json()).detail||'';}catch(e){} throw new Error(d||(path+' → '+r.status)); }
+  return r.json();
+}
+
+async function s6Poll(){ if(SLOT!==6) return; try{ s6Render(await s6api('/state')); }catch(e){} }
+
+function s6Render(s){
+  _s6snap=s;
+  const p=s.params||{};
+  // --- глобальная шапка/футер под st6 ---
+  const hp=$('hdr-pair');
+  if(hp){ hp.innerHTML = (s.pair&&s.pair.length===2) ? (s.pair[0]+' <span>÷</span> '+s.pair[1]) : 'отбор пары…'; }
+  if($('hdr-tag')) $('hdr-tag').textContent='phase 1 · paper';
+  if($('hdr-data')) $('hdr-data').textContent='данные: '+(s.data_provider||'—');
+  if($('hdr-exch')) $('hdr-exch').textContent='виртуальная биржа';
+  const hf6=$('hdr-flow');
+  if(hf6){ const on=s.live||s.player;
+    hf6.querySelector('.dot').style.background=on?'':'var(--ink-faint)';
+    hf6.querySelector('.dot').style.boxShadow=on?'':'none';
+    hf6.childNodes[1].nodeValue=on?' поток активен':' остановлено'; }
+  const note6=$('page-note');
+  if(note6) note6.innerHTML='<b>st6 — Correlation-Gated Pairs (парный mean-reversion, акции MOEX).</b> '
+    +'Режим <b>paper</b>: реальные ордера не выставляются. Из корзины отбирается лучшая коинт-пара, '
+    +'торгуем возврат спреда A−β·B к среднему по z-score с корреляционным гейтом, '
+    +'индикаторы по закрытым свечам (no repaint). <b>Форвард-тест гипотезы.</b>';
+  // текущая пара
+  const ps=s.pair_stat;
+  if(ps && ps.a){
+    $('s6-pair').innerHTML=
+      `<b style="color:var(--ink)">${ps.a} ÷ ${ps.b}</b><br>`+
+      `corr <b>${fmt(ps.corr,3)}</b> · β <b>${fmt(ps.beta,3)}</b> · p-value <b>${ps.pvalue!=null?(+ps.pvalue).toFixed(4):'—'}</b><br>`+
+      `half-life <b>${ps.halflife!=null?(+ps.halflife).toFixed(1):'—'}</b> бар · score <b>${ps.score!=null?fmt(ps.score,3):'—'}</b>`+
+      (s.basket&&s.basket.length?`<br><span style="color:var(--ink-faint);font-size:11px">корзина: ${s.basket.join(', ')}</span>`:'');
+  } else {
+    $('s6-pair').innerHTML='<span style="color:var(--ink-dim)">отбор пары…</span>'
+      +(s.basket&&s.basket.length?`<br><span style="color:var(--ink-faint);font-size:11px">корзина: ${s.basket.join(', ')}</span>`:'');
+  }
+  // статус
+  let dot='var(--ink-faint)';
+  if(s.position){ dot='var(--short)'; }
+  else if(!s.warmup_done){ dot='var(--warn)'; }
+  else if(s.live||s.player){ dot='var(--signal)'; }
+  $('s6-status-dot').style.background=dot;
+  $('s6-status-txt').textContent = s.live?'LIVE':(s.player?'демо':'остановлено');
+  let sub=s.strategy_name||'';
+  if(s.cur_z!=null) sub+=` · z=${s.cur_z>=0?'+':''}${fmt(s.cur_z,2).replace(/^\+/,'')}`;
+  if(s.wait_reason) sub+=` · ${s.wait_reason}`;
+  if(!s.warmup_done && s.bars_have!=null) sub+=` · прогрев ${s.bars_have} бар`;
+  $('s6-status-sub').textContent=sub;
+  // ридауты
+  $('s6-ro-z').textContent = s.cur_z!=null? fmt(s.cur_z,2) : '—';
+  $('s6-ro-corr').textContent = s.cur_corr!=null? fmt(s.cur_corr,3).replace(/^\+/,'') : '—';
+  $('s6-ro-beta').textContent = s.cur_beta!=null? fmt(s.cur_beta,3) : '—';
+  // позиция
+  const pb=$('s6-pos');
+  if(s.position){
+    const po=s.position;
+    pb.style.display='';
+    pb.innerHTML=`<b style="color:${po.side==='long'?'var(--signal)':'var(--short)'}">${po.side==='long'?'ЛОНГ спред':'ШОРТ спред'}</b><br>`
+      +`лонг ${po.ticker_a} · шорт ${po.ticker_b} · β ${fmt(po.beta,3)}<br>`
+      +`вход z=${fmt(po.entry_z,2)} · держит ${po.bars_held} бар`;
+  } else pb.style.display='none';
+  // параметры (только если не редактируется)
+  if(!(document.activeElement && document.activeElement.id && document.activeElement.id.startsWith('s6-p-'))){
+    if(p.z_entry!=null) $('s6-p-entry').value=p.z_entry;
+    if(p.z_stop!=null) $('s6-p-stop').value=p.z_stop;
+    if(p.corr_enter!=null) $('s6-p-corr').value=p.corr_enter;
+  }
+  // summary
+  const sm=s.summary||{};
+  $('s6-summary').innerHTML=
+    `сделок <b>${sm.trades||0}</b> · win <b style="color:var(--signal)">${sm.win_rate_pct||0}%</b><br>`+
+    `net <b style="color:${(sm.net_pnl_rub||0)>=0?'var(--signal)':'var(--loss)'}">${s6money(sm.net_pnl_rub||0)}</b><br>`+
+    `equity <b>${Math.round(sm.equity_rub||0).toLocaleString('ru')} ₽</b> (${fmt(sm.return_pct||0,2)}%) · ср.держание ${sm.avg_bars_held||0} бар`;
+  // журнал действий
+  const ev=$('s6-events');
+  if(s.events&&s.events.length){
+    const kc={position:'var(--signal)',exit:'var(--ink)',halt:'var(--loss)',warn:'var(--warn)',info:'var(--ink-dim)',signal:'var(--warn)',pair:'var(--signal)'};
+    ev.innerHTML=s.events.slice().reverse().map(e=>{
+      const m=s4msk(e.ts*1000); return `<div><span style="color:var(--ink-faint)">${m.hh}:${m.mm}</span> <span style="color:${kc[e.kind]||'var(--ink-dim)'}">${e.message}</span></div>`;
+    }).join('');
+  } else ev.textContent='—';
+  // сделки
+  s6RenderTrades(s.trades||[]);
+  // график
+  s6DrawChart(s);
+}
+
+function s6RenderTrades(trades){
+  const tb=$('s6-trades').querySelector('tbody'); tb.innerHTML='';
+  if(!trades.length){ tb.innerHTML='<tr><td colspan="6" class="empty">сделок ещё не было</td></tr>'; return; }
+  trades.slice().reverse().forEach(t=>{
+    const dir=t.side==='long'?'<span style="color:var(--signal)">лонг</span>':'<span style="color:var(--short)">шорт</span>';
+    const rs={exit:'возврат z',take:'тейк',stop:'стоп z',corr_break:'распад corr',flat_all:'flat-all',time_stop:'тайм-стоп'}[t.reason]||t.reason||'';
+    const pair=(t.ticker_a&&t.ticker_b)?`${t.ticker_a}÷${t.ticker_b}`:'—';
+    const net=t.net_pnl_rub!=null?t.net_pnl_rub:0;
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${dir}</td><td>${pair}</td><td>${t.entry_z!=null?fmt(t.entry_z,2):'—'}</td><td>${t.bars_held!=null?t.bars_held:'—'}</td>`+
+      `<td style="color:${net>=0?'var(--signal)':'var(--loss)'};font-weight:600">${s6money(net)}</td>`+
+      `<td style="color:var(--ink-dim)">${rs}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+// график z-score спреда: линия z + горизонтали ±z_entry / ±z_stop / 0 (Hi-DPI как s5DrawChart)
+function s6DrawChart(s){
+  const cv=$('s6chart'); if(!cv) return;
+  if(arguments.length>0 && s) _s6lastHist=s;
+  const snp=_s6lastHist; if(!snp) return;
+  const r=cv.getBoundingClientRect();
+  if(r.width<5||r.height<5){ requestAnimationFrame(()=>s6DrawChart()); return; }
+  const dpr=devicePixelRatio||1; cv.width=r.width*dpr; cv.height=r.height*dpr;
+  const ctx=cv.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+  const W=r.width,H=r.height; ctx.clearRect(0,0,W,H);
+  const series=(snp.history||[]).filter(p=>p&&p.z!=null&&!Number.isNaN(p.z));
+  if(series.length<2){ ctx.fillStyle=getCSS('--ink-dim'); ctx.font='12px IBM Plex Mono,monospace'; ctx.fillText('прогрев…',12,24); return; }
+  const pr=snp.params||{};
+  const zEntry=+pr.z_entry||2, zStop=+pr.z_stop||3.5;
+  const cs=getComputedStyle(document.documentElement);
+  const C={band:cs.getPropertyValue('--chart-band').trim(),mid:cs.getPropertyValue('--chart-mid').trim(),
+           line:cs.getPropertyValue('--chart-line').trim(),loss:cs.getPropertyValue('--loss').trim(),
+           ax:cs.getPropertyValue('--ink-faint').trim(),grid:cs.getPropertyValue('--line').trim()};
+  const ML=44,MB=22,MT=6,MR=8;
+  const px0=ML,px1=W-MR,py0=MT,py1=H-MB;
+  const zs=series.map(p=>p.z);
+  let lim=Math.max(zStop*1.15, Math.max(...zs.map(Math.abs))*1.1, 1);
+  const lo=-lim, hi=lim;
+  const x=i=>px0+(series.length<2?0.5:i/(series.length-1))*(px1-px0), y=v=>py1-(v-lo)/(hi-lo)*(py1-py0);
+  // сетка Y
+  ctx.font='9px IBM Plex Mono, monospace'; ctx.textBaseline='middle'; ctx.textAlign='right';
+  const TY=5;
+  for(let i=0;i<=TY;i++){ const v=lo+(hi-lo)*i/TY, yy=y(v);
+    ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.globalAlpha=.5;
+    ctx.beginPath(); ctx.moveTo(px0,yy); ctx.lineTo(px1,yy); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.fillStyle=C.ax; ctx.fillText(v.toFixed(1), px0-6, yy); }
+  // ось X (МСК по ts)
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  const TX=Math.min(5,series.length-1);
+  for(let i=0;i<=TX;i++){ const idx=Math.round(i/TX*(series.length-1)), xx=x(idx);
+    const lbl=series[idx].ts?s4tsLabel(series[idx].ts*1000):('#'+idx);
+    ctx.fillStyle=C.ax; ctx.fillText(lbl, xx, py1+5); }
+  // горизонталь 0
+  ctx.strokeStyle=C.mid; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px0,y(0)); ctx.lineTo(px1,y(0)); ctx.stroke();
+  // ±z_entry (пунктир)
+  ctx.setLineDash([4,4]); ctx.strokeStyle=C.band; ctx.lineWidth=1;
+  [zEntry,-zEntry].forEach(v=>{ if(v>lo&&v<hi){ ctx.beginPath(); ctx.moveTo(px0,y(v)); ctx.lineTo(px1,y(v)); ctx.stroke(); } });
+  // ±z_stop (пунктир, loss)
+  ctx.strokeStyle=C.loss;
+  [zStop,-zStop].forEach(v=>{ if(v>lo&&v<hi){ ctx.beginPath(); ctx.moveTo(px0,y(v)); ctx.lineTo(px1,y(v)); ctx.stroke(); } });
+  ctx.setLineDash([]);
+  // линия z
+  ctx.beginPath(); series.forEach((p,i)=>{const X=x(i),Y=y(p.z);i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  ctx.strokeStyle=C.line; ctx.lineWidth=1.6; ctx.stroke();
+  // последняя точка
+  const lx=x(series.length-1), ly=y(series[series.length-1].z);
+  ctx.beginPath();ctx.arc(lx,ly,3.5,0,7);ctx.fillStyle=C.line;ctx.shadowColor=C.line;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
+}
+function s6Redraw(){ if(_s6lastHist) s6DrawChart(); }
+
+function s6Init(){
+  if(!_s6Started){
+    _s6Started=true;
+    $('s6-btn-live').onclick=async()=>{ try{ await s6api('/control/start','POST'); s6Poll(); }catch(e){alert(e.message);} };
+    $('s6-btn-player').onclick=async()=>{ try{ await s6api('/player/start','POST'); s6Poll(); }catch(e){alert(e.message);} };
+    $('s6-btn-stop').onclick=async()=>{ const s=_s6snap||{}; try{ if(s.live) await s6api('/control/stop','POST'); else await s6api('/player/stop','POST'); s6Poll(); }catch(e){alert(e.message);} };
+    $('s6-btn-reset').onclick=async()=>{ if(!confirm('Сбросить сессию st6 (журнал/баланс)?')) return; try{ await s6api('/reset','POST'); s6Poll(); }catch(e){alert(e.message);} };
+    $('s6-btn-apply').onclick=async()=>{
+      const body={ strategy:{ z_entry:+$('s6-p-entry').value, z_stop:+$('s6-p-stop').value, corr_enter:+$('s6-p-corr').value } };
+      $('s6-apply-msg').textContent='применяю…';
+      try{ await s6api('/config','POST',body); $('s6-apply-msg').textContent='✓'; s6Poll(); }
+      catch(e){ $('s6-apply-msg').textContent='ошибка: '+e.message; }
+    };
+  }
+  s6Poll();
+}
+
 /* ===== СТАРТ ===== */
-resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history); if(SLOT===4)s4Redraw(); if(SLOT===5)s5Redraw();});
+resize(); addEventListener('resize',()=>{resize();if(snap)draw(snap.history); if(SLOT===4)s4Redraw(); if(SLOT===5)s5Redraw(); if(SLOT===6)s6Redraw();});
 (async()=>{
   markSlot();
   if(SLOT===3){ momInit(); }
   else if(SLOT===4){ s4Init(); }
   else if(SLOT===5){ s5Init(); }
+  else if(SLOT===6){ s6Init(); }
   else { await initSession(); }
-  setInterval(()=>{ if(SLOT!==3 && SLOT!==4 && SLOT!==5) poll(); }, POLL_MS);
+  setInterval(()=>{ if(SLOT!==3 && SLOT!==4 && SLOT!==5 && SLOT!==6) poll(); }, POLL_MS);
   setInterval(()=>{ if(SLOT===4) s4Poll(); }, 1500);
   setInterval(()=>{ if(SLOT===5) s5Poll(); }, 1500);
+  setInterval(()=>{ if(SLOT===6) s6Poll(); }, 1500);
 })();
 </script>
 </body>
