@@ -35,13 +35,15 @@ class StrategyConfig(BaseModel):
     z_entry: float = 2.0
     z_exit: float = 0.3
     z_stop: float = 3.5
-    # корреляционный гейт
-    corr_enter: float = 0.80          # вход разрешён только если |corr| >= этого
-    corr_break: float = 0.55          # если |corr| падает ниже — аварийный выход
+    # корреляционный гейт. Калибровано под реальные дневные данные акций MOEX: на горизонте
+    # ~2 года |corr| родственных бумаг ~0.55-0.65 (не 0.8 как на синтетике/внутри дня) —
+    # иначе годной пары нет вовсе (бэктест 600 баров: при 0.6 находится SIBN/NVTK corr0.62 p0.06).
+    corr_enter: float = 0.58          # вход разрешён только если |corr| >= этого
+    corr_break: float = 0.45          # если |corr| падает ниже — аварийный выход
     # отбор пары (скан корзины)
-    select_min_corr: float = 0.80
-    select_max_pvalue: float = 0.10   # ADF p-value для коинтеграции спреда
-    select_max_halflife: float = 240.0
+    select_min_corr: float = 0.60
+    select_max_pvalue: float = 0.20   # ADF p-value для коинтеграции спреда
+    select_max_halflife: float = 400.0
     # риск/сайзинг
     risk_fraction: float = 0.02       # доля equity на нотионал каждой ноги
     time_stop_bars: int = 0           # 0 = выкл; иначе принудительный выход по барам
