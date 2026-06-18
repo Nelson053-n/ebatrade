@@ -1680,18 +1680,11 @@ async function momDaily(){
   }catch(e){ $('daily-text').textContent='ошибка загрузки сводки'; }
 }
 $('btnDaily').onclick=momDaily;
-let _momLoaded=false;  // тяжёлые бэктест/сравнение автозапускаем один раз за сессию
 $('m-refresh').onclick=()=>{ momState(); momDaily(); };
 function momInit(){
-  momState(); momDaily();   // разовая загрузка при открытии вкладки (без автообновления)
-  if(!_momLoaded){
-    _momLoaded=true;
-    // автозагрузка тяжёлых блоков (грузят историю с биржи; кэшируются на бэке)
-    $('btnCompare').click();
-    $('btnBacktest').click();
-  }
-  // автообновление убрано по запросу: st3 обновляется только при открытии вкладки
-  // или по кнопке «обновить». Таймер на всякий случай гасим.
+  momState(); momDaily();   // публичные GET (без auth) — разовая загрузка при открытии
+  // НЕ автозапускаем backtest/compare: они под basic-auth (anti-DoS) → браузер показывал
+  // окно пароля при открытии вкладки. Пользователь жмёт «прогнать»/«сравнить» сам.
   if(_momTimer){ clearInterval(_momTimer); _momTimer=null; }
 }
 $('btnBacktest').onclick=async()=>{
