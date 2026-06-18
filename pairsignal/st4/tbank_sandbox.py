@@ -162,6 +162,20 @@ def find_future(ticker: str) -> dict:
     raise TBankError(f"фьючерс {ticker} не найден в справочнике")
 
 
+def find_share(ticker: str) -> dict:
+    """Найти АКЦИЮ по тикеру через InstrumentsService.Shares + фильтр (для st6).
+
+    Возвращает запись того же формата, что find_future: figi, uid, lot (РАЗНЫЙ у акций —
+    NLMK=10, CHMF=1), min_price_increment, флаги торгуемости (apiTradeAvailableFlag и пр.).
+    instrumentStatus=INSTRUMENT_STATUS_BASE — только базовый (торгуемый) список бумаг.
+    """
+    resp = _call(_INSTRUMENTS, "Shares", {"instrumentStatus": "INSTRUMENT_STATUS_BASE"})
+    for it in resp.get("instruments", []):
+        if it.get("ticker") == ticker:
+            return it
+    raise TBankError(f"акция {ticker} не найдена в справочнике")
+
+
 # код интервала ТЗ (минуты) → enum CandleInterval T-Bank
 _CANDLE_INTERVAL = {1: "CANDLE_INTERVAL_1_MIN", 5: "CANDLE_INTERVAL_5_MIN",
                     10: "CANDLE_INTERVAL_10_MIN", 60: "CANDLE_INTERVAL_HOUR"}

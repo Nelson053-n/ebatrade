@@ -14,6 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import data_feed as feed
+from ..st4.tbank_sandbox import has_token as _has_token  # токен общий с st4
 from .config import St5Config
 from .engine import TradingEngine
 from .models import BotState, InstrumentSpec, Position, PriceBar
@@ -88,7 +89,7 @@ class St5Session:
         self.state = {"live": False, "player": False, "session_started": None,
                       "paused_by_user": False, "last_event": None,
                       "data_source": "synthetic", "warmup_done": False,
-                      "trade_start_ts": None}
+                      "sandbox_active": False, "trade_start_ts": None}
         self.history: list[dict] = []
         self.events: list[dict] = []
         self.player_df = None
@@ -100,13 +101,97 @@ class St5Session:
     def resolve_real_leg(self) -> None:
         self.spec = feed.resolve_leg(self.cfg)
 
+    def _restore_engine_position(self) -> None:
+        """Восстановить состояние движка из session-файла в (только что пересозданный в
+        reset_engine) движок: ЖУРНАЛ СДЕЛОК, баланс, дневной P&L и открытую позицию.
+
+        Нужно для sandbox: позиция требуется для reconciliation (если на счёте та же
+        позиция, что вёл движок до рестарта — она ЛЕГИТИМНА, не закрываем). Журнал/баланс
+        переносим, чтобы форвард-тест продолжался, а не обнулялся при активации sandbox."""
+        try:
+            if not self._session_file.exists():
+                return
+            data = json.loads(self._session_file.read_text())
+            if "balance_rub" in data:
+                self.engine.balance_rub = data["balance_rub"]
+            self.engine.trades = [self._trade_from_json(t) for t in data.get("trades", [])]
+            self.engine.risk.day_pnl_rub = data.get("day_pnl_rub", 0.0)
+            self.engine.risk._day = data.get("day_key", "")
+            pos = data.get("position")
+            if pos:
+                self.engine.position = self._position_from_json(pos)
+                self.engine.state = self.engine.position.state
+                self.engine._bars_held = int(data.get("bars_held", 0))
+        except Exception:  # noqa: BLE001  битый файл не должен ронять старт
+            pass
+
+    def _position_matches_lots(self, lots: int) -> bool:
+        """Совпадает ли позиция движка с фактическим балансом инструмента на sandbox-счёте.
+        LONG (side=buy) = +lots, SHORT (side=sell) = −lots."""
+        p = self.engine.position
+        if p is None:
+            return False
+        want = p.lots * (1 if p.side == "buy" else -1)
+        return lots == want
+
     def reset_engine(self, real: bool = False) -> None:
         if real:
             try:
                 self.resolve_real_leg()
             except Exception:  # noqa: BLE001  оффлайн — синтетическая спека
                 self.spec = feed.synthetic_spec()
-        self.engine = TradingEngine(self.cfg, self.spec)
+        # cfg.connector.mode — НАМЕРЕНИЕ оператора (не трогаем). sandbox_active — ФАКТ:
+        # активен ли реальный исполнитель сейчас. Sandbox активируется только в live (real=True);
+        # на синтетике движок строим как paper (рыночные ордера по выдуманным барам бессмысленны).
+        want_sandbox = self.cfg.connector.mode == "tbank_sandbox"
+        self.state["sandbox_active"] = False
+        self.state["sandbox_error"] = None
+        if want_sandbox and real:
+            try:
+                self.engine = TradingEngine(self.cfg, self.spec)
+                # восстановить позицию из сессии ДО reconciliation: если на счёте та же
+                # позиция, что вёл движок до рестарта — она ЛЕГИТИМНА, не закрываем.
+                self._restore_engine_position()
+                self.state["sandbox_active"] = True
+                # RECONCILIATION: сверяем баланс инструмента на sandbox-счёте с позицией движка.
+                # Совпали → принимаем (движок продолжает вести сделку). Разошлись → закрываем
+                # «осиротевшую» ногу (счёт привести к состоянию движка).
+                try:
+                    ex = self.engine.executor
+                    lots = ex.broker_lots()
+                    if lots != 0:
+                        if self._position_matches_lots(lots):
+                            self.log_event("info", f"reconciliation: позиция на счёте "
+                                           f"{lots:+d} совпала с движком — продолжаем сделку")
+                        else:
+                            self.log_event("warn", f"reconciliation: на sandbox-счёте висит "
+                                           f"{lots:+d} (не совпало с движком) — закрываю")
+                            if ex.flat_broker():
+                                self.log_event("info", "reconciliation: счёт приведён к FLAT")
+                                self.engine.position = None
+                                self.engine.state = BotState.FLAT
+                            else:
+                                self.log_event("warn", "reconciliation: не удалось закрыть ногу")
+                except Exception as e:  # noqa: BLE001  сверка не должна ронять старт
+                    self.log_event("warn", f"reconciliation пропущена: {e}")
+            except Exception as e:  # noqa: BLE001  sandbox недоступен → откат в paper-движок
+                msg = str(e)
+                if "401" in msg:
+                    msg = "токен T-Bank невалиден или отозван (HTTP 401) — выпустите новый"
+                self.state["sandbox_error"] = msg
+                self.log_event("warn", f"sandbox не активирован: {msg} → исполнение paper")
+                paper_cfg = self.cfg.model_copy(deep=True)
+                paper_cfg.connector.mode = "paper"
+                self.engine = TradingEngine(paper_cfg, self.spec)
+                self._restore_engine_position()   # live-фолбэк: сохранить журнал/баланс/позицию
+        else:
+            # синтетика или paper-намерение: строим paper-движок (не трогая cfg.connector.mode)
+            paper_cfg = self.cfg
+            if want_sandbox:
+                paper_cfg = self.cfg.model_copy(deep=True)
+                paper_cfg.connector.mode = "paper"
+                self.state["last_event"] = "sandbox активен только в live — на синтетике paper"
+            self.engine = TradingEngine(paper_cfg, self.spec)
         self.history = []
         self.player_df = None
         self.player_idx = 0
@@ -204,7 +289,14 @@ class St5Session:
             sp = data.get("spec")
             if sp:
                 self.spec = InstrumentSpec(**sp)
-            self.engine = TradingEngine(self.cfg, self.spec)
+            # восстановление — всегда paper-движок: sandbox-исполнитель в конструкторе ходит
+            # в сеть (счёт/инструмент), а при загрузке сети может не быть. Sandbox активируется
+            # отдельно в reset_engine при старте live. cfg.connector.mode (намерение) не трогаем.
+            cfg = self.cfg
+            if cfg.connector.mode == "tbank_sandbox":
+                cfg = self.cfg.model_copy(deep=True)
+                cfg.connector.mode = "paper"
+            self.engine = TradingEngine(cfg, self.spec)
             self.engine.balance_rub = data.get("balance_rub", self.engine.balance_rub)
             self.engine.risk.day_pnl_rub = data.get("day_pnl_rub", 0.0)
             self.engine.risk._day = data.get("day_key", "")
@@ -230,10 +322,26 @@ class St5Session:
 
     # ---------- фоновые задачи ----------
     async def run_live(self) -> None:
-        """Live на MOEX ISS: backfill+replay, затем ждём новые свечи (как st4, но одна нога)."""
+        """Live: backfill+replay, затем ждём новые свечи (как st4, но одна нога).
+
+        Источник свечей: в sandbox — T-Bank (REAL-TIME, без лага ISS), иначе MOEX ISS
+        (публичный, задержка 15-30 мин). uid инструмента берём из sandbox-исполнителя.
+        Sandbox исполняет по ТЕКУЩЕЙ цене T-Bank → на backfill-replay (исторические бары)
+        реальные ордера бессмысленны: на replay движок disarmed (только прогрев momentum),
+        arm включаем после replay — торгуем с первого живого бара. Для paper всегда armed.
+        """
         replayed = False
         self.engine._check_lag = True
-        self.log_event("info", f"live запущен (paper, MOEX ISS): {self.spec.code}, "
+        sandbox = self.state.get("sandbox_active", False)
+        tbank_uid = None
+        if sandbox and self.engine.executor is not None:
+            try:
+                tbank_uid = self.engine.executor.leg_uid()
+            except Exception:  # noqa: BLE001  не удалось — откатываемся на ISS
+                tbank_uid = None
+        src_lbl = "T-Bank real-time" if tbank_uid else "MOEX ISS"
+        mode_lbl = "T-Bank sandbox" if sandbox else "paper"
+        self.log_event("info", f"live запущен ({mode_lbl}, данные {src_lbl}): {self.spec.code}, "
                        f"прогрев momentum…")
         while self.state["live"]:
             try:
@@ -242,9 +350,20 @@ class St5Session:
                         and d2e < self.cfg.instrument.rollover_days_before_expiry
                         and await asyncio.to_thread(self._rollover)):
                     self.log_event("info", f"роллировер: торгуем {self.spec.code}")
-                df = await asyncio.to_thread(
-                    feed.read_ohlcv_moex, self.cfg, self.warmup_limit(), self.spec.code)
-                df = df.iloc[:-1]   # ISS: без формирующегося бара
+                    if sandbox and self.engine.executor is not None:
+                        try:
+                            tbank_uid = self.engine.executor.leg_uid()
+                        except Exception:  # noqa: BLE001
+                            tbank_uid = None
+                if tbank_uid:
+                    df = await asyncio.to_thread(
+                        feed.read_ohlcv_tbank, self.cfg, self.warmup_limit(), tbank_uid)
+                    # T-Bank get_candles уже отдаёт только закрытые бары → не режем хвост
+                else:
+                    df = await asyncio.to_thread(
+                        feed.read_ohlcv_moex, self.cfg, self.warmup_limit(), self.spec.code)
+                    df = df.iloc[:-1]   # ISS: без формирующегося бара
+                self.engine.arm(not (sandbox and not replayed))  # на replay входы закрыты
                 async with self._lock:
                     new_bars = 0
                     for ts, row in df.iterrows():
@@ -291,13 +410,21 @@ class St5Session:
             await asyncio.sleep(self.cfg.poll_seconds)
 
     def _rollover(self) -> bool:
-        """Пере-резолв серии с переносом журнала/баланса. True — серия сменилась."""
+        """Пере-резолв серии с переносом журнала/баланса. True — серия сменилась.
+
+        В sandbox новый движок поднимает sandbox-исполнитель на новую серию (сетевой вызов —
+        ОК, вызывается из to_thread). Если sandbox не активен (paper/фолбэк), строим paper-движок,
+        не трогая cfg.connector.mode."""
         old = self.spec.code
         self.resolve_real_leg()
         if self.spec.code == old:
             return False
         prev = self.engine
-        eng = TradingEngine(self.cfg, self.spec)
+        cfg = self.cfg
+        if not self.state.get("sandbox_active"):
+            cfg = self.cfg.model_copy(deep=True)
+            cfg.connector.mode = "paper"
+        eng = TradingEngine(cfg, self.spec)
         eng.balance_rub = prev.balance_rub
         eng.trades = prev.trades
         eng.risk.day_pnl_rub = prev.risk.day_pnl_rub
@@ -371,10 +498,22 @@ class St5Session:
         else:
             wait = f"ждём вход по тренду: momentum {lookback_return:+.2f}% → {_dir}"
 
+        # честный провайдер котировок: в sandbox-live свечи из T-Bank (real-time)
+        if self.state["data_source"] == "live":
+            data_provider = "T-Bank" if self.state.get("sandbox_active") else "MOEX ISS"
+        else:
+            data_provider = "синтетика"
         return _clean({
             "live": self.state["live"], "player": self.state["player"],
             "data_source": self.state["data_source"],
-            "data_provider": "MOEX ISS" if self.state["data_source"] == "live" else "синтетика",
+            "data_provider": data_provider,
+            # коннектор: mode — намерение оператора, sandbox_active — реально ли активен sandbox
+            # сейчас (только в live). Сам токен НИКОГДА не отдаём, только token_set (bool).
+            "connector_mode": self.cfg.connector.mode,
+            "sandbox_active": self.state.get("sandbox_active", False),
+            "sandbox_error": self.state.get("sandbox_error"),
+            "token_set": _has_token(),
+            "connector_account": self.cfg.connector.account_id or None,
             "auto_approve": self.cfg.auto_approve,
             "fsm_state": eng.state.value,
             "halted": eng.risk.halted, "halt_reason": eng.risk.halt_reason,

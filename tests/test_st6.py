@@ -188,3 +188,126 @@ def test_st6_session_player_trades_on_synthetic():
     snap = s.snapshot(0.0)
     assert snap["pair"] is not None, "должна выбраться коинтегрированная пара"
     assert snap["summary"]["trades"] > 0, "синтетика должна дать сделки"
+
+
+# ----------------------------------------------------- sandbox-исполнитель (мок)
+class _FakeSB:
+    """Мок tbank_sandbox: акции с РАЗНЫМИ лотами, локальный учёт штук на счёте.
+
+    NLMK lot=10, CHMF lot=1 — проверяем lot-кратное исполнение и reconciliation.
+    """
+
+    LOTS = {"NLMK": 10, "CHMF": 1}
+    PRICE = {"NLMK": 200.0, "CHMF": 1200.0}
+
+    def __init__(self, fail_second: bool = False, not_tradable: bool = False):
+        self.fail_second = fail_second
+        self.not_tradable = not_tradable
+        self.accounts = []
+        self.shares = {"NLMK": 0, "CHMF": 0}   # штук на счёте (по тикеру)
+        self.calls = 0
+
+    # справочник
+    def find_share(self, ticker):
+        if ticker not in self.LOTS:
+            raise RuntimeError(f"акция {ticker} не найдена")
+        return {"ticker": ticker, "figi": f"FIGI_{ticker}", "uid": f"UID_{ticker}",
+                "lot": self.LOTS[ticker], "minPriceIncrement": {"units": "0", "nano": 10_000_000}}
+
+    def _uid(self, it):
+        return it.get("uid") or it.get("figi")
+
+    def _q_to_float(self, q):
+        if not q:
+            return 0.0
+        return int(q.get("units", 0)) + int(q.get("nano", 0)) / 1e9
+
+    def is_tradable(self, uid):
+        return not self.not_tradable
+
+    # счёт
+    def list_accounts(self):
+        return self.accounts
+
+    def open_account(self, name):
+        acc = {"id": "ACC1", "name": name, "status": "ACCOUNT_STATUS_OPEN"}
+        self.accounts.append(acc)
+        return acc["id"]
+
+    def pay_in(self, account_id, rub):
+        return float(rub)
+
+    # ордера
+    def _ticker_by_uid(self, uid):
+        return "NLMK" if uid.endswith("NLMK") else "CHMF"
+
+    def post_order(self, account_id, uid, lots, direction, order_id, order_type="ORDER_TYPE_MARKET"):
+        self.calls += 1
+        ticker = self._ticker_by_uid(uid)
+        # вторая нога всегда падает (для теста unwind): CHMF исполняется второй (меньший лот),
+        # реджектим все её заявки — первую (NLMK) исполнитель откатит обратным ордером.
+        if self.fail_second and ticker == "CHMF":
+            return {"executionReportStatus": "EXECUTION_REPORT_STATUS_REJECTED"}
+        shares = lots * self.LOTS[ticker]
+        signed = shares if direction == "ORDER_DIRECTION_BUY" else -shares
+        self.shares[ticker] += signed
+        total = self.PRICE[ticker] * shares    # СУММА за все штуки
+        return {"executionReportStatus": "EXECUTION_REPORT_STATUS_FILL",
+                "lotsExecuted": str(lots),
+                "executedOrderPrice": {"units": str(int(total)), "nano": 0}}
+
+    def positions(self, account_id):
+        return {"securities": [
+            {"instrumentUid": f"UID_{t}", "balance": n} for t, n in self.shares.items() if n]}
+
+
+def _make_executor(**kw):
+    from pairsignal.st6.config import ConnectorConfig
+    from pairsignal.st6.tinkoff_executor import St6SandboxExecutor
+    sb = _FakeSB(**kw)
+    ex = St6SandboxExecutor(ConnectorConfig(), "NLMK", "CHMF", sb=sb)
+    return ex, sb
+
+
+def test_sandbox_executor_different_lots_entry_and_exit():
+    """Вход/выход пары с РАЗНЫМИ лотами: штуки кратны лоту, счёт возвращается к нулю."""
+    from pairsignal.st6.core import Side
+    ex, sb = _make_executor()
+    # 95 штук NLMK (lot 10 → 9 лотов = 90 шт), 7 штук CHMF (lot 1 → 7 шт)
+    r = ex.execute_pair(Side.LONG_SPREAD, 95, 7, 200.0, 1200.0)
+    assert r.ok, r.reason
+    assert r.fill_a.ticker == "NLMK" and r.fill_a.shares == 90   # 95//10*10
+    assert r.fill_b.ticker == "CHMF" and r.fill_b.shares == 7
+    assert sb.shares == {"NLMK": 90, "CHMF": -7}                 # long A / short B
+    # выход — обратные ордера, счёт к нулю
+    from pairsignal.st6.core import Position
+    pos = Position(side=Side.LONG_SPREAD, qty_a=90, qty_b=7, entry_a=200.0, entry_b=1200.0)
+    cr = ex.close_pair(pos)
+    assert cr.exit_a == 200.0 and cr.exit_b == 1200.0
+    assert sb.shares == {"NLMK": 0, "CHMF": 0}
+
+
+def test_sandbox_executor_unwind_on_second_leg_fail():
+    """Срыв второй ноги → unwind первой, итог чистый (счёт к нулю), ok=False."""
+    from pairsignal.st6.core import Side
+    ex, sb = _make_executor(fail_second=True)
+    r = ex.execute_pair(Side.SHORT_SPREAD, 30, 5, 200.0, 1200.0)
+    assert not r.ok and r.unwound
+    assert all(v == 0 for v in sb.shares.values()), sb.shares
+
+
+def test_sandbox_executor_is_tradable_gate():
+    """is_tradable=False, когда биржа закрыта (обе ноги проверяются)."""
+    ex, _ = _make_executor(not_tradable=True)
+    assert ex.is_tradable() is False
+    ex2, _ = _make_executor()
+    assert ex2.is_tradable() is True
+
+
+def test_sandbox_executor_flat_broker_reconciliation():
+    """flat_broker закрывает осиротевшие ноги по штукам (reconciliation)."""
+    ex, sb = _make_executor()
+    sb.shares = {"NLMK": 20, "CHMF": -3}     # висят ноги, движок их не знает
+    assert ex.broker_lots() == {"NLMK": 20, "CHMF": -3}
+    assert ex.flat_broker() is True
+    assert sb.shares == {"NLMK": 0, "CHMF": 0}

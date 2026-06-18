@@ -93,6 +93,20 @@ class Paper(BaseModel):
     taker_fee_rub_per_lot: float = 1.0    # сбор за лот за сделку (одна нога, не пара)
 
 
+class ConnectorConfig(BaseModel):
+    """Выбор исполнителя ордеров. Только paper или sandbox — боевой контур запрещён.
+
+    По образцу st4.ConnectorConfig: токена ЗДЕСЬ НЕТ — секрет не сериализуется в
+    session_state_5_*.json. Токен T-Bank живёт только в окружении процесса (env
+    TBANK_TOKEN, общий с st4). account_id/payin_rub несекретны и переживают рестарт.
+    Sandbox активен только в live (на синтетике трактуется как paper).
+    """
+    mode: Literal["paper", "tbank_sandbox"] = "paper"
+    account_id: str = ""                  # переиспользуемый sandbox-счёт; пусто → открыть новый
+    payin_rub: int = 200_000              # пополнение sandbox-счёта под ГО при старте
+    account_name: str = "st5-momentum-sandbox"
+
+
 class St5Config(BaseModel):
     instrument: InstrumentConfig = Field(default_factory=InstrumentConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
@@ -100,5 +114,6 @@ class St5Config(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     paper: Paper = Field(default_factory=Paper)
+    connector: ConnectorConfig = Field(default_factory=ConnectorConfig)
     poll_seconds: int = 20
     auto_approve: bool = True

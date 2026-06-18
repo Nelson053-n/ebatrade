@@ -306,3 +306,173 @@ def test_snapshot_has_momentum_fields():
         assert key in snap
     assert snap["lookback"] == 48
     assert "Momentum" in snap["strategy_name"]
+
+
+def test_snapshot_has_connector_fields():
+    """snapshot отдаёт поля коннектора (без токена — только token_set bool)."""
+    s = St5Session("sber")
+    snap = s.snapshot(0.0)
+    for key in ("connector_mode", "sandbox_active", "sandbox_error", "token_set"):
+        assert key in snap
+    assert snap["connector_mode"] == "paper"          # дефолт
+    assert snap["sandbox_active"] is False
+    assert "token" not in snap                          # сам секрет не утекает
+    assert isinstance(snap["token_set"], bool)
+
+
+# ===================== Phase 2: T-Bank sandbox executor =====================
+
+class FakeSB:
+    """Мок модуля tbank_sandbox для юнит-тестов St5SandboxExecutor (без сети).
+
+    fail_from: с какого по счёту вызова post_order начинать реджектить (None = все fill).
+    futures: список позиций фьючерсов на счёте (для broker_lots/reconciliation).
+    """
+
+    def __init__(self, fail_from=None, accounts=None, futures=None, tradable=True):
+        self.orders: list[tuple] = []
+        self.fail_from = fail_from
+        self.payins: list[tuple] = []
+        self.opened: list[str] = []
+        self._accounts = accounts or []
+        self._futures = futures or []
+        self._tradable = tradable
+
+    @staticmethod
+    def _uid(it):
+        return it["uid"]
+
+    @staticmethod
+    def _q_to_float(q):
+        if not q:
+            return 0.0
+        return float(q.get("units", 0)) + float(q.get("nano", 0)) / 1e9
+
+    def find_future(self, ticker):
+        return {"ticker": ticker, "uid": "uid-" + ticker, "figi": "figi-" + ticker,
+                "lot": 1, "apiTradeAvailableFlag": True}
+
+    def is_tradable(self, uid):
+        return self._tradable
+
+    def list_accounts(self):
+        return self._accounts
+
+    def open_account(self, name="x"):
+        self.opened.append(name)
+        return "acc-new"
+
+    def pay_in(self, acc, rub):
+        self.payins.append((acc, rub))
+        return float(rub)
+
+    def positions(self, acc):
+        return {"futures": self._futures}
+
+    def post_order(self, acc, uid, lots, direction, order_id,
+                   order_type="ORDER_TYPE_MARKET", price=None):
+        import uuid as _uuid
+        _uuid.UUID(order_id)            # упадёт, если order_id не валидный UUID
+        self.orders.append((uid, direction, order_id))
+        n = len(self.orders)
+        if self.fail_from is not None and n >= self.fail_from:
+            return {"executionReportStatus": "EXECUTION_REPORT_STATUS_REJECTED",
+                    "executedOrderPrice": None}
+        price = 32000
+        # T-Bank: executedOrderPrice = СУММА за все лоты + lotsExecuted
+        return {"executionReportStatus": "EXECUTION_REPORT_STATUS_FILL",
+                "lotsExecuted": lots,
+                "executedOrderPrice": {"units": str(price * lots), "nano": 0}}
+
+
+def _st5_exec(fail_from=None, accounts=None, futures=None, tradable=True):
+    from pairsignal.st5.tinkoff_executor import St5SandboxExecutor
+    cfg = St5Config()
+    spec = feed.synthetic_spec()
+    spec.code = "SRU6"
+    sb = FakeSB(fail_from=fail_from, accounts=accounts, futures=futures, tradable=tradable)
+    ex = St5SandboxExecutor(cfg.execution, cfg.connector, spec, sb=sb)
+    return ex, sb
+
+
+def test_st5_executor_execute_ok():
+    """execute() → market-ордер fill, счёт открыт + pay_in, orderId — валидный UUID."""
+    ex, sb = _st5_exec()
+    f = ex.execute("buy", lots=1, ref_price=32000)
+    assert f.side == "buy" and f.lots == 1 and f.avg_price == 32000
+    assert len(sb.orders) == 1
+    assert sb.orders[0][1] == "ORDER_DIRECTION_BUY"
+    assert sb.opened == ["st5-momentum-sandbox"]
+    assert sb.payins and sb.payins[0][1] == 200_000
+
+
+def test_st5_executor_price_per_contract_multi_lot():
+    """При lots>1 цена входа = за КОНТРАКТ, не сумма за лоты."""
+    ex, sb = _st5_exec()
+    f = ex.execute("sell", lots=10, ref_price=32000)
+    assert f.avg_price == 32000 and f.lots == 10     # не 320000
+
+
+def test_st5_executor_execute_fail_raises():
+    """Ордер входа не залился за все попытки → UnwindError."""
+    from pairsignal.st5.tinkoff_executor import UnwindError
+    ex, sb = _st5_exec(fail_from=1)
+    with pytest.raises(UnwindError):
+        ex.execute("buy", lots=1, ref_price=32000)
+
+
+def test_st5_executor_close_reverse_order():
+    """close() ставит ОБРАТНЫЙ ордер и возвращает цену выхода."""
+    ex, sb = _st5_exec()
+    pos = Position(state=BotState.LONG, side="buy", lots=1, entry_price=32000,
+                   entry_ts=0, entry_vwap=32000, entry_fee_rub=0.0)
+    f = ex.close(pos, ref_price=32050)
+    assert f.side == "sell"                            # закрытие лонга = sell
+    assert f.avg_price == 32000
+    assert sb.orders[-1][1] == "ORDER_DIRECTION_SELL"
+
+
+def test_st5_executor_is_tradable():
+    """is_tradable проксирует флаг биржи (гейт неторгового времени)."""
+    ex_ok, _ = _st5_exec(tradable=True)
+    assert ex_ok.is_tradable() is True
+    ex_no, _ = _st5_exec(tradable=False)
+    assert ex_no.is_tradable() is False
+
+
+def test_st5_executor_broker_lots_and_flat():
+    """broker_lots читает баланс инструмента на счёте; flat_broker закрывает его."""
+    futs = [{"instrumentUid": "uid-SRU6", "balance": 3}]
+    ex, sb = _st5_exec(futures=futs)
+    assert ex.broker_lots() == 3
+    n = len(sb.orders)
+    assert ex.flat_broker() is True
+    assert sb.orders[-1][1] == "ORDER_DIRECTION_SELL"  # закрытие лонга +3 → sell
+    assert len(sb.orders) == n + 1
+
+
+def test_st5_executor_account_reuse():
+    """Существующий OPEN-счёт с нужным именем переиспользуется — open_account не зван."""
+    accs = [{"id": "acc-existing", "name": "st5-momentum-sandbox",
+             "status": "ACCOUNT_STATUS_OPEN"}]
+    ex, sb = _st5_exec(accounts=accs)
+    assert ex._account_id == "acc-existing"
+    assert sb.opened == []
+
+
+def test_engine_paper_executor_by_default():
+    """mode='paper' (дефолт) → engine.executor is None (встроенный paper-филл)."""
+    eng = TradingEngine(St5Config(), _spec())
+    assert eng.executor is None
+
+
+def test_engine_uses_sandbox_when_mode(monkeypatch):
+    """mode='tbank_sandbox' → engine.executor = St5SandboxExecutor (с моком sb)."""
+    import pairsignal.st5.tinkoff_executor as te
+    monkeypatch.setattr(te, "tbank_sandbox", FakeSB())
+    cfg = St5Config()
+    cfg.connector.mode = "tbank_sandbox"
+    spec = _spec()
+    spec.code = "SRU6"
+    eng = TradingEngine(cfg, spec)
+    assert type(eng.executor).__name__ == "St5SandboxExecutor"

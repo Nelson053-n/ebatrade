@@ -1684,12 +1684,31 @@ async def st5_set_config(payload: dict, inst: str = "sber"):
 
 
 async def _st5_autoresume(ST5: St5Session):
-    """Автостарт live после рестарта сервера (paper — продолжение сессии без сброса)."""
+    """Автостарт live после рестарта сервера.
+
+    Paper: восстановленный движок продолжает (momentum прогревается в run_live по last_live_ts).
+    Sandbox: исполнителю нужен счёт — полный старт через reset_engine, журнал/баланс переносим.
+    """
     ST5.state["player"] = False
     ST5.state["data_source"] = "live"
     ST5.state["live"] = True
     ST5.log_event("info", "автовозобновление live после рестарта сервера")
-    await ST5.run_live()
+    if ST5.cfg.connector.mode == "tbank_sandbox":
+        prev = ST5.engine                       # восстановленная сессия (журнал/баланс)
+        started = ST5.state["session_started"]
+        await asyncio.to_thread(ST5.reset_engine, True)
+        # продолжение форвард-теста: reset нужен только ради sandbox-счёта — журнал, баланс
+        # и день риска переносим. Позицию не переносим: reconciliation в reset_engine уже
+        # привела счёт к согласованному с движком состоянию.
+        eng = ST5.engine
+        eng.trades = prev.trades
+        eng.balance_rub = prev.balance_rub
+        eng.risk.day_pnl_rub = prev.risk.day_pnl_rub
+        eng.risk._day = prev.risk._day
+        ST5.state["session_started"] = started
+        ST5.save_session()
+    if ST5.state["live"]:
+        await ST5.run_live()
 
 
 @app.post("/st5/control/start")
@@ -1809,6 +1828,55 @@ def st5_reset(inst: str = "sber"):
     ST5 = _st5(inst)
     ST5.reset_engine(real=(ST5.state["data_source"] == "live"))
     return {"ok": True}
+
+
+@app.post("/st5/connector")
+def st5_connector(payload: dict, inst: str = "sber"):
+    """Установить режим исполнителя (paper|tbank_sandbox) и (опц.) API-токен T-Bank.
+
+    Токен ОБЩИЙ с st4: сохраняется в .tbank_token (0600, в .gitignore) и в env процесса.
+    В ответе НЕ возвращается. Sandbox активен только в live; при недоступности sandbox
+    reset_engine откатывает в paper. По образцу /st4/connector.
+    """
+    from .st4 import tbank_sandbox as _sb
+
+    ST5 = _st5(inst)
+    mode = payload.get("mode")
+    if mode not in ("paper", "tbank_sandbox"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    token = (payload.get("token") or "").strip()
+    if token:
+        _sb.save_token(token)                        # в файл (0600) + env
+    if mode == "tbank_sandbox" and not _sb.has_token():
+        raise HTTPException(400, "для sandbox нужен токен (вставьте в поле API-токен)")
+    if "payin_rub" in payload:
+        try:
+            ST5.cfg.connector.payin_rub = int(payload["payin_rub"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "payin_rub: не число")
+    ST5.cfg.connector.mode = mode
+    ST5.state["live"] = ST5.state["player"] = False
+    ST5.reset_engine(real=(ST5.state["data_source"] == "live"))
+    return {"ok": True, "connector_mode": ST5.cfg.connector.mode,
+            "token_set": _sb.has_token(),
+            "sandbox_active": ST5.state.get("sandbox_active", False),
+            "sandbox_error": ST5.state.get("sandbox_error")}
+
+
+@app.post("/st5/connector/forget-token")
+def st5_forget_token():
+    """Удалить сохранённый токен (из файла и env). Откатить в paper ВСЕ инструменты st5.
+
+    Токен общий с st4 — после этого st4-sandbox тоже перестанет активироваться (нужен новый
+    токен). Здесь откатываем только st5-сессии; st4 переживёт со своим reset при следующем старте.
+    """
+    from .st4 import tbank_sandbox as _sb
+    _sb.save_token("")                               # пусто → удаляет файл + env
+    for s5 in ST5S.values():
+        if s5.cfg.connector.mode != "paper":
+            s5.cfg.connector.mode = "paper"
+            s5.reset_engine(real=(s5.state["data_source"] == "live"))
+    return {"ok": True, "token_set": False, "connector_mode": "paper"}
 
 
 @app.get("/st5/trades")
@@ -1976,6 +2044,53 @@ def st6_reset():
 def st6_trades():
     return {"trades": _st6().snapshot(_server_started).get("trades", [])}
 
+
+@app.post("/st6/connector")
+def st6_connector(payload: dict):
+    """Установить режим исполнителя st6 (paper|tbank_sandbox) и (опц.) API-токен T-Bank.
+
+    Токен сохраняется через st4.tbank_sandbox.save_token (файл 0600 + env, ОБЩИЙ с st4),
+    в ответе НЕ возвращается. Sandbox активен только в live (активируется в run_live);
+    при недоступности sandbox откатывается в paper (sandbox_error в snapshot).
+    """
+    from .st4 import tbank_sandbox as _sb
+
+    s = _st6()
+    mode = payload.get("mode")
+    if mode not in ("paper", "tbank_sandbox"):
+        raise HTTPException(400, "mode: paper | tbank_sandbox")
+    token = (payload.get("token") or "").strip()
+    if token:
+        _sb.save_token(token)                        # в файл (0600) + env
+    if mode == "tbank_sandbox" and not _sb.has_token():
+        raise HTTPException(400, "для sandbox нужен токен (вставьте в поле API-токен)")
+    if "payin_rub" in payload:
+        try:
+            s.cfg.connector.payin_rub = int(payload["payin_rub"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "payin_rub: не число")
+    s.cfg.connector.mode = mode
+    # смена режима на стопе: live перезапустится оператором (там и активируется sandbox)
+    s.state["live"] = s.state["player"] = False
+    s.state["sandbox_active"] = False
+    s.state["sandbox_error"] = None
+    s.save_session()
+    return {"ok": True, "connector_mode": s.cfg.connector.mode,
+            "token_set": _sb.has_token()}
+
+
+@app.post("/st6/connector/forget-token")
+def st6_forget_token():
+    """Удалить сохранённый токен (файл + env) и откатить st6 в paper. Токен общий с st4."""
+    from .st4 import tbank_sandbox as _sb
+    _sb.save_token("")
+    s = _st6()
+    if s.cfg.connector.mode != "paper":
+        s.cfg.connector.mode = "paper"
+    s.state["sandbox_active"] = False
+    s.state["sandbox_error"] = None
+    s.save_session()
+    return {"ok": True, "token_set": False, "connector_mode": "paper"}
 
 @app.get("/st6/tests")
 async def st6_tests():

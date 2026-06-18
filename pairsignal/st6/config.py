@@ -9,6 +9,8 @@ to_params().
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from .core import Params
@@ -72,6 +74,20 @@ class StrategyConfig(BaseModel):
         )
 
 
+class ConnectorConfig(BaseModel):
+    """Выбор исполнителя ордеров st6: paper (дефолт) или T-Bank sandbox.
+
+    Боевой контур запрещён — только SandboxService. Токена здесь НЕТ: секрет не
+    сериализуется в session_state_6.json, живёт только в окружении процесса (env
+    TBANK_TOKEN, общий с st4 через st4/tbank_sandbox.save_token). account_id/payin_rub
+    несекретны и переживают рестарт. Sandbox активен только в live (на синтетике — paper).
+    """
+    mode: Literal["paper", "tbank_sandbox"] = "paper"
+    account_id: str = ""              # переиспользуемый sandbox-счёт; пусто → открыть новый
+    payin_rub: int = 500_000          # пополнение sandbox-счёта при старте (акции — рубли)
+    account_name: str = "st6-pairs-sandbox"
+
+
 class St6Config(BaseModel):
     """Полный конфиг сессии st6."""
     basket: list[str] = Field(default_factory=lambda: list(DEFAULT_BASKET))
@@ -82,5 +98,7 @@ class St6Config(BaseModel):
     reselect_every_bars: int = 20     # как часто пере-выбирать лучшую пару (вне позиции)
     start_equity_rub: float = 1_000_000.0
     poll_seconds: int = 1800          # период опроса ISS в live (дневной ТФ — редко)
-    connector: str = "paper"          # paper-only (Phase 1); T-Bank НЕ подключаем
+    # коннектор: paper (дефолт) или tbank_sandbox. Структурный (ранее был строкой "paper" —
+    # legacy-строка из старых session-файлов конвертируется в service.load_session).
+    connector: ConnectorConfig = Field(default_factory=ConnectorConfig)
     auto_approve: bool = True         # вход без ручного подтверждения (как st5)

@@ -19,6 +19,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from ..st4.tbank_sandbox import has_token as _has_token
 from . import data_feed as feed
 from .config import St6Config
 from .core import (
@@ -131,12 +132,16 @@ class St6Session:
         self.bars_since_select = 0
         self.state = {"live": False, "player": False, "session_started": None,
                       "paused_by_user": False, "last_event": None,
-                      "data_source": "synthetic", "warmup_done": False}
+                      "data_source": "synthetic", "warmup_done": False,
+                      "sandbox_active": False, "sandbox_error": None}
         self.history: list[dict] = []     # ряд z/spread выбранной пары для графика
         self.events: list[EngineEvent] = []
         self.player_closes: dict[str, list[float]] | None = None
         self.player_idx = 0
         self.last_live_ts = 0
+        # sandbox-исполнитель пары акций (None в paper). Резолвится на текущую пару;
+        # пересоздаётся при смене пары (reselect). Сетевой — только в live.
+        self.executor = None
         self._lock = asyncio.Lock()
 
     @property
@@ -182,11 +187,55 @@ class St6Session:
         return True
 
     def _maybe_reselect(self) -> None:
-        """Пере-выбор пары вне позиции по таймеру reselect_every_bars."""
+        """Пере-выбор пары вне позиции по таймеру reselect_every_bars.
+
+        В sandbox при СМЕНЕ пары пересоздаём исполнитель на новые тикеры (позиции нет —
+        _maybe_reselect срабатывает только вне позиции, так что закрывать нечего)."""
         if self.port.position.is_open:
             return
         if self.pair is None or self.bars_since_select >= self.cfg.reselect_every_bars:
+            before = self.pair
             self.select_pair()
+            if self.state.get("sandbox_active") and self.pair and self.pair != before:
+                self._ensure_executor(rebuild=True)
+
+    # ---------- sandbox: исполнитель пары ----------
+    def _lot_sizes(self) -> tuple[int, int]:
+        """Размеры лотов текущей пары (sandbox) — для lot-кратного сайзинга. (1,1) если нет."""
+        ex = self.executor
+        if ex is None or not self.pair:
+            return 1, 1
+        try:
+            return ex._lot_size(self.pair[0]), ex._lot_size(self.pair[1])
+        except Exception:  # noqa: BLE001
+            return 1, 1
+
+    def _ensure_executor(self, rebuild: bool = False) -> bool:
+        """Создать (или пересоздать на новую пару) sandbox-исполнитель. True — готов.
+
+        Ошибки T-Bank (нет токена/401/инструмент не найден) → откат в paper: sandbox_active
+        снимаем, sandbox_error заполняем, торговля продолжается paper-учётом."""
+        if not self.pair:
+            return False
+        same = (self.executor is not None
+                and (self.executor.ticker_a, self.executor.ticker_b) == self.pair)
+        if same and not rebuild:
+            return True
+        from .tinkoff_executor import St6SandboxExecutor
+        try:
+            self.executor = St6SandboxExecutor(self.cfg.connector, self.pair[0], self.pair[1])
+            self.state["sandbox_active"] = True
+            self.state["sandbox_error"] = None
+            return True
+        except Exception as e:  # noqa: BLE001  sandbox недоступен → paper
+            msg = str(e)
+            if "401" in msg:
+                msg = "токен T-Bank невалиден или отозван (HTTP 401) — выпустите новый"
+            self.executor = None
+            self.state["sandbox_active"] = False
+            self.state["sandbox_error"] = msg
+            self.log_event("warn", f"sandbox не активирован: {msg} → исполнение paper")
+            return False
 
     # ---------- шаг по последнему закрытому бару ----------
     def step(self, ts: int) -> None:
@@ -206,23 +255,125 @@ class St6Session:
         sig = decide(a, b, pos, p)
         self.cur = {"z": sig.z, "corr": sig.corr, "beta": sig.beta}
         ca, cb = float(a[-1]), float(b[-1])
+        sandbox = self.state.get("sandbox_active") and self.executor is not None
 
         if pos.is_open:
             pos.bars_held += 1
             if sig.action == "EXIT":
-                tr = self.port.close_pair(ts, ca, cb, sig.z, sig.reason.value, p)
+                xa, xb = ca, cb
+                if sandbox:
+                    res = self._sandbox_close(pos)
+                    if res is None:       # выход отложен (рынок закрыт) — позиция остаётся
+                        self.push_history(ts)
+                        return
+                    xa, xb = res
+                tr = self.port.close_pair(ts, xa, xb, sig.z, sig.reason.value, p)
                 self.log_event("exit", f"выход {tr.side} {ta}/{tb} | {tr.reason} | "
                                f"net {tr.net_pnl_rub:+.0f}₽ (z={sig.z:+.2f})")
         else:
             if sig.action in ("ENTER_LONG", "ENTER_SHORT"):
-                qa, qb = leg_quantities(self.port.equity, ca, cb, sig.beta, 1, 1, p)
+                lot_a, lot_b = self._lot_sizes() if sandbox else (1, 1)
+                qa, qb = leg_quantities(self.port.equity, ca, cb, sig.beta, lot_a, lot_b, p)
+                # qa/qb из leg_quantities — число ЛОТОВ; для sandbox переводим в штуки
+                sh_a, sh_b = (qa * lot_a, qb * lot_b) if sandbox else (qa, qb)
                 if qa > 0 and qb > 0:
                     side = (Side.LONG_SPREAD if sig.action == "ENTER_LONG"
                             else Side.SHORT_SPREAD)
-                    self.port.open_pair(side, ta, tb, ts, ca, cb, qa, qb, sig.beta, sig.z)
+                    ea, eb, fa, fb = ca, cb, sh_a, sh_b
+                    if sandbox:
+                        res = self._sandbox_open(side, sh_a, sh_b, ca, cb)
+                        if res is None:   # вход не состоялся (реджект/неторговое время) — FLAT
+                            self.push_history(ts)
+                            return
+                        ea, eb, fa, fb = res
+                    self.port.open_pair(side, ta, tb, ts, ea, eb, fa, fb, sig.beta, sig.z)
                     self.log_event("position", f"вход {side.name} {ta}/{tb} | "
-                                   f"qa={qa} qb={qb} | z={sig.z:+.2f} corr={sig.corr:+.2f}")
+                                   f"qa={fa} qb={fb} | z={sig.z:+.2f} corr={sig.corr:+.2f}")
         self.push_history(ts)
+
+    # ---------- sandbox: атомарный вход/выход ----------
+    def _sandbox_open(self, side: Side, shares_a: int, shares_b: int,
+                      ref_a: float, ref_b: float):
+        """Реальный вход пары акций в песочнице. Возвращает (entry_a, entry_b, shares_a,
+        shares_b) по факту филла или None (вход не состоялся / неторговое время / ошибка).
+
+        Гейт неторгового времени: рынок закрыт → вход откладываем (None). UnwindError/прочая
+        ошибка sandbox → откат в paper (отключаем sandbox_active, вход в этом баре пропускаем).
+        """
+        from .tinkoff_executor import UnwindError
+        ex = self.executor
+        if hasattr(ex, "is_tradable") and not ex.is_tradable():
+            self.log_event("warn", "вход отложен: рынок закрыт (неторговое время)")
+            return None
+        try:
+            r = ex.execute_pair(side, shares_a, shares_b, ref_a, ref_b)
+        except UnwindError as e:
+            self.state["sandbox_error"] = str(e)
+            self.log_event("warn", f"sandbox HALT при входе: {e} → дальше paper")
+            self.state["sandbox_active"] = False
+            return None
+        except Exception as e:  # noqa: BLE001
+            self.state["sandbox_error"] = str(e)
+            self.log_event("warn", f"ошибка sandbox при входе: {e} → дальше paper")
+            self.state["sandbox_active"] = False
+            return None
+        if not r.ok:
+            self.log_event("warn", r.reason)
+            return None
+        return r.fill_a.avg_price, r.fill_b.avg_price, r.fill_a.shares, r.fill_b.shares
+
+    def _sandbox_close(self, pos: Position):
+        """Реальный выход пары в песочнице. (exit_a, exit_b) по факту или None (отложен).
+
+        Неторговое время → откладываем (позиция остаётся). Ошибка закрытия (голая позиция) →
+        sandbox_error + отключаем sandbox; в paper-учёте всё равно закрываем по цене бара
+        (вызывающий код подставит ca/cb), чтобы локальное состояние не зависло открытым."""
+        ex = self.executor
+        if hasattr(ex, "is_tradable") and not ex.is_tradable():
+            self.log_event("warn", "выход отложен: рынок закрыт (неторговое время)")
+            return None
+        try:
+            r = ex.close_pair(pos)
+            return r.exit_a, r.exit_b
+        except Exception as e:  # noqa: BLE001  в т.ч. UnwindError (голая позиция)
+            self.state["sandbox_error"] = str(e)
+            self.state["sandbox_active"] = False
+            self.log_event("warn", f"ошибка sandbox при выходе: {e} → закрываю учёт по цене бара")
+            ta, tb = self.pair
+            a, b = self.closes.get(ta), self.closes.get(tb)
+            return (float(a[-1]), float(b[-1])) if a and b else (pos.entry_a, pos.entry_b)
+
+    # ---------- sandbox: активация + reconciliation ----------
+    def activate_sandbox(self) -> None:
+        """Активировать sandbox-исполнение в live: создать исполнитель на текущую пару +
+        reconciliation. Откат в paper (sandbox_error) при недоступности. Вызывается из run_live.
+
+        reconciliation: если на sandbox-счёте висят ноги текущей пары, а у нас позиции нет —
+        приводим счёт к FLAT (осиротевшие ноги); если позиция есть — оставляем (доверяем
+        восстановленному состоянию)."""
+        if self.cfg.connector.mode != "tbank_sandbox":
+            self.state["sandbox_active"] = False
+            return
+        if not _has_token():
+            self.state["sandbox_active"] = False
+            self.state["sandbox_error"] = "нет токена T-Bank"
+            return
+        if not self.pair:
+            # пары ещё нет (прогрев) — отметим намерение, исполнитель создастся при отборе
+            self.state["sandbox_active"] = True
+            self.state["sandbox_error"] = None
+            return
+        if not self._ensure_executor(rebuild=True):
+            return
+        try:
+            lots = self.executor.broker_lots()
+            if any(v != 0 for v in lots.values()) and not self.port.position.is_open:
+                self.log_event("warn", f"reconciliation: на счёте висят {lots} "
+                               "(локальной позиции нет) — закрываю")
+                if self.executor.flat_broker():
+                    self.log_event("info", "reconciliation: счёт приведён к FLAT")
+        except Exception as e:  # noqa: BLE001  сверка не должна ронять старт
+            self.log_event("warn", f"reconciliation пропущена: {e}")
 
     def reset_engine(self) -> None:
         self.port = PaperPortfolio(self.cfg.start_equity_rub)
@@ -235,6 +386,9 @@ class St6Session:
         self.player_closes = None
         self.player_idx = 0
         self.last_live_ts = 0
+        self.executor = None
+        self.state["sandbox_active"] = False
+        self.state["sandbox_error"] = None
         self.state["last_event"] = None
         self.state["warmup_done"] = False
         self.state["session_started"] = time.time()
@@ -290,6 +444,9 @@ class St6Session:
         try:
             cfg = data.get("config")
             if cfg:
+                # legacy: connector раньше был строкой ("paper"); конвертируем в структурный
+                if isinstance(cfg.get("connector"), str):
+                    cfg = {**cfg, "connector": {"mode": cfg["connector"]}}
                 self.cfg = St6Config(**cfg)
             self.port = PaperPortfolio(self.cfg.start_equity_rub)
             self.port.equity = data.get("equity", self.port.equity)
@@ -326,7 +483,12 @@ class St6Session:
         формирующийся бар отбрасываем (только закрытые свечи, no repaint).
         """
         self.state["data_source"] = "live"
-        self.log_event("info", f"live запущен (paper, MOEX ISS): корзина "
+        # активация sandbox (только в live): создаёт исполнитель + reconciliation, либо
+        # откат в paper (sandbox_error). На синтетике/плеере — всегда paper.
+        if self.cfg.connector.mode == "tbank_sandbox":
+            await asyncio.to_thread(self.activate_sandbox)
+        mode_lbl = "T-Bank sandbox" if self.state.get("sandbox_active") else "paper"
+        self.log_event("info", f"live запущен ({mode_lbl}, MOEX ISS): корзина "
                        f"{len(self.cfg.basket)} тикеров, прогрев…")
         first = True
         while self.state["live"]:
@@ -343,7 +505,12 @@ class St6Session:
                         n = min(len(v) for v in self.closes.values())
                         ts = int(time.time() * 1000)
                         if n > self.warmup_limit() and ts != self.last_live_ts:
-                            self.step(ts)
+                            # sandbox-шаг делает сетевые вызовы (ордера) → в отдельном потоке,
+                            # чтобы не блокировать event loop; paper-шаг — мгновенный.
+                            if self.state.get("sandbox_active"):
+                                await asyncio.to_thread(self.step, ts)
+                            else:
+                                self.step(ts)
                             self.last_live_ts = ts
                             if first:
                                 self.state["warmup_done"] = True
@@ -425,7 +592,14 @@ class St6Session:
             "data_source": self.state["data_source"],
             "data_provider": "MOEX ISS" if self.state["data_source"] == "live" else "синтетика",
             "auto_approve": self.cfg.auto_approve,
-            "connector": self.cfg.connector,
+            # коннектор: mode — намерение оператора; sandbox_active — реально ли активен
+            # sandbox сейчас (только в live). Токен не отдаём, только token_set.
+            "connector": self.cfg.connector.mode,           # совместимость (раньше строка)
+            "connector_mode": self.cfg.connector.mode,
+            "sandbox_active": self.state.get("sandbox_active", False),
+            "sandbox_error": self.state.get("sandbox_error"),
+            "token_set": _has_token(),
+            "connector_account": self.cfg.connector.account_id or None,
             "session_started": self.state["session_started"],
             "server_started": server_started, "now": time.time(),
             "paused_by_user": self.state["paused_by_user"],

@@ -109,6 +109,14 @@ class TradingEngine:
         self.spec = spec
         self.momentum = MomentumIndicator(cfg.strategy.lookback)
         self.volavg = VolumeAverage()
+        # выбор исполнителя: paper (executor=None → встроенный paper-филл, поведение без
+        # изменений) или sandbox T-Bank. Sandbox-импорт локальный, чтобы paper-режим и
+        # тесты не тащили сетевые зависимости. Sandbox стартует в своём конструкторе
+        # (счёт+pay_in) — ошибки ловит service.reset_engine (откат в paper).
+        self.executor = None
+        if cfg.connector.mode == "tbank_sandbox":
+            from .tinkoff_executor import St5SandboxExecutor
+            self.executor = St5SandboxExecutor(cfg.execution, cfg.connector, spec)
         self.risk = RiskManager(cfg.risk, cfg.session)
 
         self.state = BotState.FLAT
@@ -175,9 +183,10 @@ class TradingEngine:
         # ---- принудительное закрытие к концу сессии (овернайт-риск) ----
         if (self.position is not None and self.cfg.strategy.flat_at_session_end
                 and is_session_end(bar.ts, self.cfg.session)):
-            trade = self._close_position(bar, "eod")
-            events.append(EngineEvent(bar.ts, "exit",
-                          f"конец сессии — закрытие (net {trade.net_pnl_rub:+.0f}₽)", {}))
+            trade = self._auto_close(bar, "eod", events)
+            if trade is not None:
+                events.append(EngineEvent(bar.ts, "exit",
+                              f"конец сессии — закрытие (net {trade.net_pnl_rub:+.0f}₽)", {}))
             return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                               trade=trade, events=events)
 
@@ -185,19 +194,21 @@ class TradingEngine:
         if self.position is not None:
             d2e = self.days_to_expiry(bar.ts)
             if d2e is not None and d2e < self.cfg.instrument.rollover_days_before_expiry:
-                trade = self._close_position(bar, "rollover")
-                events.append(EngineEvent(bar.ts, "exit",
-                              f"роллировер: до экспирации {d2e} дн (net {trade.net_pnl_rub:+.0f}₽)", {}))
+                trade = self._auto_close(bar, "rollover", events)
+                if trade is not None:
+                    events.append(EngineEvent(bar.ts, "exit",
+                                  f"роллировер: до экспирации {d2e} дн (net {trade.net_pnl_rub:+.0f}₽)", {}))
                 return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                                   trade=trade, events=events)
 
         # ---- дневной kill-switch (реализованный + нереализованный) ----
         if self.position is not None and self.risk.day_loss_breached(bar.ts, self.unrealized_rub()):
-            trade = self._close_position(bar, "stop")
-            self.risk.halt(f"дневной лимит убытка {self.cfg.risk.max_daily_loss_rub:.0f}₽")
-            self.state = BotState.HALTED
-            events.append(EngineEvent(bar.ts, "halt",
-                          f"дневной лимит: позиция закрыта (net {trade.net_pnl_rub:+.0f}₽), HALTED", {}))
+            trade = self._auto_close(bar, "stop", events)
+            if trade is not None:
+                self.risk.halt(f"дневной лимит убытка {self.cfg.risk.max_daily_loss_rub:.0f}₽")
+                self.state = BotState.HALTED
+                events.append(EngineEvent(bar.ts, "halt",
+                              f"дневной лимит: позиция закрыта (net {trade.net_pnl_rub:+.0f}₽), HALTED", {}))
             return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                               trade=trade, events=events)
 
@@ -207,10 +218,11 @@ class TradingEngine:
                 self.position, self._bars_held, bar.close,
                 self.cfg.strategy.holding, self.cfg.strategy.stop_pct)
             if should_exit:
-                trade = self._close_position(bar, reason)
-                label = "стоп" if reason == "stop" else "holding"
-                events.append(EngineEvent(bar.ts, "exit",
-                              f"выход ({label}): net {trade.net_pnl_rub:+.0f}₽", {}))
+                trade = self._auto_close(bar, reason, events)
+                if trade is not None:
+                    label = "стоп" if reason == "stop" else "holding"
+                    events.append(EngineEvent(bar.ts, "exit",
+                                  f"выход ({label}): net {trade.net_pnl_rub:+.0f}₽", {}))
                 return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                                   trade=trade, events=events)
 
@@ -232,6 +244,11 @@ class TradingEngine:
                     events.append(EngineEvent(bar.ts, "warn", "объём бара ниже порога — пропуск", {}))
                 elif not self._data_fresh(bar):
                     events.append(EngineEvent(bar.ts, "warn", "данные устарели — пропуск входа", {}))
+                elif not self._is_tradable():
+                    # sandbox: реальный вход в неторговое время реджектится биржей —
+                    # пропускаем (сигнал пересоберётся на ближайшем баре открытой сессии)
+                    events.append(EngineEvent(bar.ts, "warn",
+                                  "вход пропущен: рынок закрыт (неторговое время)", {}))
                 else:
                     ok, why = self.risk.can_enter(bar.ts)
                     if not ok:
@@ -264,6 +281,35 @@ class TradingEngine:
             return True
         return (time.time() * 1000 - bar.ts) <= lag * 60_000
 
+    def _is_tradable(self) -> bool:
+        """Гейт неторгового времени: для sandbox спрашиваем биржу (реальный ордер в
+        клиринг/ночь/выходные реджектится HTTP400 30079). Paper всегда торгуем."""
+        ex = self.executor
+        if ex is None:
+            return True
+        try:
+            return ex.is_tradable()
+        except Exception:  # noqa: BLE001  не смогли узнать — не блокируем
+            return True
+
+    def _auto_close(self, bar: PriceBar, reason: str,
+                    events: list[EngineEvent]) -> Optional[Trade]:
+        """Авто-выход через исполнитель с двумя защитами для sandbox:
+          • рынок закрыт → ОТКЛАДЫВАЕМ выход (None, позиция сохраняется до открытия рынка);
+          • ордер выхода не залился (UnwindError) → HALTED (голую позицию не оставляем).
+        Возвращает Trade при успехе, иначе None (события дописаны)."""
+        if not self._is_tradable():
+            events.append(EngineEvent(bar.ts, "warn",
+                          f"выход ({reason}) отложен: рынок закрыт (неторговое время)", {}))
+            return None
+        try:
+            return self._close_position(bar, reason)
+        except Exception as e:  # noqa: BLE001  UnwindError sandbox — голая позиция недопустима
+            self.risk.halt(str(e))
+            self.state = BotState.HALTED
+            events.append(EngineEvent(bar.ts, "halt", f"HALTED: {e}", {}))
+            return None
+
     # ---------- human-in-the-loop ----------
     def approve(self) -> Optional[StepResult]:
         if self._pending is None or self.position is not None:
@@ -289,8 +335,22 @@ class TradingEngine:
         self.state = BotState.ENTERING
         lots = self.cfg.execution.quantity_lots
         side = "buy" if sig == Signal.BUY else "sell"
-        fill = self._fill_price(side, bar.close)
-        slip = abs(fill - bar.close) / self.spec.tick_size
+        # цена входа: sandbox — фактический филл реального market-ордера; paper — модель книги.
+        if self.executor is not None:
+            from .tinkoff_executor import UnwindError
+            try:
+                f = self.executor.execute(side, lots, bar.close)
+            except UnwindError as e:
+                self.risk.on_error()
+                self.state = BotState.HALTED if self.risk.halted else BotState.FLAT
+                events.append(EngineEvent(bar.ts, "warn", f"вход не состоялся: {e}", {}))
+                return StepResult(state=self.state, reading=reading, signal=sig, events=events)
+            fill = f.avg_price
+            slip = abs(f.slippage_ticks)
+            lots = f.lots
+        else:
+            fill = self._fill_price(side, bar.close)
+            slip = abs(fill - bar.close) / self.spec.tick_size
         fee = self.cfg.paper.taker_fee_rub_per_lot * lots
         self.balance_rub -= fee
         self.risk.on_success()
@@ -310,7 +370,12 @@ class TradingEngine:
     def _close_position(self, bar: PriceBar, reason: str) -> Trade:
         p = self.position
         close_side = "sell" if p.side == "buy" else "buy"
-        fill = self._fill_price(close_side, bar.close)
+        # цена выхода: sandbox — фактический филл обратного market-ордера; paper — модель книги.
+        # close() пробрасывает UnwindError (голая позиция) — ловится вызывающим (step → HALTED).
+        if self.executor is not None:
+            fill = self.executor.close(p, bar.close).avg_price
+        else:
+            fill = self._fill_price(close_side, bar.close)
         gross = _pnl_rub(p.side, p.entry_price, fill, p.lots, self.spec)
         exit_fee = self.cfg.paper.taker_fee_rub_per_lot * p.lots
         net = gross - p.entry_fee_rub - exit_fee

@@ -90,6 +90,33 @@ def read_ohlcv_moex_range(cfg: St5Config, since: datetime, code: str | None = No
     return _ohlcv(code, cfg.strategy.candle_interval_minutes, since=since)
 
 
+def read_ohlcv_tbank(cfg: St5Config, limit: int, uid: str) -> pd.DataFrame:
+    """Close инструмента из T-Bank (REAL-TIME, без лага ISS) — для sandbox-live.
+
+    uid — instrument uid из справочника T-Bank (резолвит вызывающий через executor.leg_uid).
+    Тянем закрытые свечи за окно, покрывающее limit баров. Колонки open/high/low/close/volume
+    (как read_ohlcv_moex — единый контракт для движка); T-Bank отдаёт только close, поэтому
+    OHL=close, volume=0 (объёмный фильтр на T-Bank-данных не срабатывает — по дизайну).
+    """
+    from datetime import timedelta
+
+    from ..st4 import tbank_sandbox as _sb
+    iv = cfg.strategy.candle_interval_minutes
+    now = datetime.now(timezone.utc)
+    # T-Bank ОГРАНИЧИВАЕТ диапазон GetCandles по интервалу (для 10m ~7 дней, для 1m ~1 день).
+    _MAX_DAYS = {1: 1, 5: 7, 10: 7, 60: 90}
+    want_min = limit * iv * 2 + 3 * 24 * 60
+    cap_min = _MAX_DAYS.get(iv, 7) * 24 * 60
+    span_min = min(want_min, cap_min)
+    frm = (now - timedelta(minutes=span_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    to = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    c = pd.Series(dict(_sb.get_candles(uid, iv, frm, to)), dtype="float64").sort_index()
+    c.index.name = "ts"
+    df = pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 0.0}) \
+        .dropna(subset=["close"]).sort_index()
+    return df.iloc[-limit:] if len(df) > limit else df
+
+
 def generate_synthetic(n: int = 1500, seed: int = 17, interval_min: int = 10) -> pd.DataFrame:
     """Синтетика OHLCV одиночного инструмента: цена вокруг внутридневного якоря (OU),
     с дневным сбросом — чтобы VWAP-reversion имел что ловить (цена отходит от VWAP и
