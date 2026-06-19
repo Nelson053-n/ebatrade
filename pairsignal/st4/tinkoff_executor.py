@@ -188,6 +188,23 @@ class TinkoffSandboxExecutor:
                 out[Role.PREFERRED] = bal
         return out
 
+    def entry_prices(self) -> dict[Role, float]:
+        """Средние цены входа ног на sandbox-счёте (averagePositionPrice из портфеля).
+
+        Для восстановления позиции движка из счёта при рестарте: лоты даёт broker_lots,
+        цены входа — отсюда. 0.0 если ноги нет в портфеле."""
+        uid_o = self.sb._uid(self._inst[Role.ORDINARY])
+        uid_p = self.sb._uid(self._inst[Role.PREFERRED])
+        out = {Role.ORDINARY: 0.0, Role.PREFERRED: 0.0}
+        for f in self.sb.portfolio(self._account_id).get("positions", []):
+            uid = f.get("instrumentUid", "")
+            avg = self.sb._q_to_float(f.get("averagePositionPrice"))
+            if uid == uid_o:
+                out[Role.ORDINARY] = avg
+            elif uid == uid_p:
+                out[Role.PREFERRED] = avg
+        return out
+
     def flat_broker(self) -> bool:
         """Закрыть ВСЕ реальные позиции на sandbox-счёте по рынку (привести к FLAT).
 

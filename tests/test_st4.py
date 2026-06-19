@@ -801,3 +801,25 @@ def test_st4_pairs_endpoint_handles_optional_sma_period():
     assert {"sber", "sngr"} <= ids
     for p in r.json()["pairs"]:
         assert p["ord"] and p["pref"] and p["label"]   # все поля заполнены
+
+
+def test_adopt_position_from_account_restores_on_restart():
+    """reconciliation восстанавливает парную позицию из sandbox-счёта (рестарт→движок flat,
+    на счёте легитимная позиция → НЕ закрываем, а продолжаем вести). Регресс: раньше
+    закрывалась любая «не совпавшая» позиция, рестарт убивал живые сделки."""
+    from pairsignal.st4.service import St4Session
+    from pairsignal.st4.models import Role, BotState
+    s = St4Session("sber")
+
+    class _FakeEx:
+        def entry_prices(self):
+            return {Role.ORDINARY: 29597.0, Role.PREFERRED: 29533.0}
+    s.engine.executor = _FakeEx()
+    # на счёте short_spread: обычка -10 / преф +10
+    assert s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 10})
+    assert s.engine.state == BotState.SHORT_SPREAD
+    assert s.engine.position.leg_ord.side == "sell" and s.engine.position.leg_ord.lots == 10
+    assert s.engine.position.leg_pref.side == "buy"
+    # непарная (одна нога) — не восстанавливаем (вернёт False → дальше flat_broker)
+    s.engine.position = None
+    assert not s._adopt_position_from_account({Role.ORDINARY: -10, Role.PREFERRED: 0})

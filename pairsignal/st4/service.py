@@ -172,6 +172,37 @@ class St4Session:
         return (lots.get(Role.ORDINARY, 0) == want_ord
                 and lots.get(Role.PREFERRED, 0) == want_pref)
 
+    def _adopt_position_from_account(self, lots: dict) -> bool:
+        """Восстановить позицию ДВИЖКА из реальных лотов sandbox-счёта (при рестарте движок
+        стартует flat, но на счёте висит легитимная позиция). Направление — по знаку лотов
+        обычки: +обычка/−преф = long_spread, иначе short_spread. Цены входа — из портфеля
+        (entry_prices). Так рестарт НЕ закрывает живую сделку, а продолжает её вести.
+        True — позиция восстановлена."""
+        from .models import LegPosition, Position
+        bal_o = lots.get(Role.ORDINARY, 0)
+        bal_p = lots.get(Role.PREFERRED, 0)
+        if bal_o == 0 or bal_p == 0 or (bal_o > 0) == (bal_p > 0):
+            return False   # не парная позиция (одна нога/одинаковый знак) — не восстановить
+        state = BotState.LONG_SPREAD if bal_o > 0 else BotState.SHORT_SPREAD
+        try:
+            prices = self.engine.executor.entry_prices()
+        except Exception:  # noqa: BLE001
+            prices = {Role.ORDINARY: 0.0, Role.PREFERRED: 0.0}
+        ord_entry = prices.get(Role.ORDINARY, 0.0) or self.spec_ord.tick_size
+        pref_entry = prices.get(Role.PREFERRED, 0.0) or self.spec_pref.tick_size
+        leg_ord = LegPosition(code=self.spec_ord.code, role=Role.ORDINARY,
+                              side="buy" if bal_o > 0 else "sell",
+                              lots=abs(bal_o), entry_price=ord_entry)
+        leg_pref = LegPosition(code=self.spec_pref.code, role=Role.PREFERRED,
+                               side="buy" if bal_p > 0 else "sell",
+                               lots=abs(bal_p), entry_price=pref_entry)
+        self.engine.position = Position(
+            state=state, leg_ord=leg_ord, leg_pref=leg_pref,
+            entry_ts=int(time.time() * 1000), entry_spread=pref_entry - ord_entry,
+            entry_beta=1.0, sma_at_entry=pref_entry - ord_entry, entry_fee_rub=0.0)
+        self.engine.state = state
+        return True
+
     def reset_engine(self, real: bool = False) -> None:
         if real:
             try:
@@ -199,14 +230,20 @@ class St4Session:
                     ex = self.engine.executor
                     lots = ex.broker_lots()
                     if any(v != 0 for v in lots.values()):
+                        lots_str = dict((k.value, v) for k, v in lots.items())
                         if self._position_matches_lots(lots):
                             self.log_event("info", f"reconciliation: позиция на счёте "
-                                           f"{dict((k.value, v) for k, v in lots.items())} "
-                                           f"совпала с движком — продолжаем вести сделку")
+                                           f"{lots_str} совпала с движком — продолжаем вести сделку")
+                        elif self._adopt_position_from_account(lots):
+                            # движок стартовал flat (рестарт), но на счёте легитимная парная
+                            # позиция → ВОССТАНАВЛИВАЕМ её в движок, НЕ закрываем (стабильность)
+                            self.log_event("info", f"reconciliation: позиция на счёте {lots_str} "
+                                           f"восстановлена в движок ({self.engine.state.value}) — "
+                                           f"продолжаем вести сделку")
                         else:
+                            # действительно осиротевшие ноги (непарные/одна нога) — закрываем
                             self.log_event("warn", f"reconciliation: на sandbox-счёте висят "
-                                           f"позиции {dict((k.value, v) for k, v in lots.items())} "
-                                           f"(не совпали с движком) — закрываю")
+                                           f"позиции {lots_str} (непарные/неизвестные) — закрываю")
                             if ex.flat_broker():
                                 self.log_event("info", "reconciliation: счёт приведён к FLAT")
                                 self.engine.position = None
