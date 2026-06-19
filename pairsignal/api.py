@@ -436,7 +436,11 @@ app = FastAPI(title="pairsignal", version="0.1", lifespan=lifespan)
 def dashboard():
     if not DASHBOARD.exists():
         raise HTTPException(404, "dashboard.html не найден")
-    return FileResponse(DASHBOARD)
+    # no-cache: панель — единственный HTML, часто обновляется (правки графиков/вкладок).
+    # Без этого браузер по ETag/Last-Modified отдаёт СТАРУЮ версию из кэша (git pull не
+    # всегда меняет mtime → ETag тот же → 304 → юзер видит устаревший дашборд, графики «не
+    # отображаются»). Заставляем браузер всегда перезапрашивать свежий HTML.
+    return FileResponse(DASHBOARD, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @app.get("/health")
