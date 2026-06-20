@@ -299,13 +299,14 @@ def test_load_session_ignores_old_vwap_config(tmp_path, monkeypatch):
 
 
 def test_snapshot_has_momentum_fields():
+    """Базовые фикс-поля snapshot присутствуют (для любого режима)."""
     s = St5Session("sber")
     snap = s.snapshot(0.0)
-    for key in ("lookback", "holding", "stop_pct", "cur_signal",
-                "wait_reason", "summary", "history", "events", "strategy_name"):
+    for key in ("lookback", "holding", "stop_pct", "cur_signal", "cur_z",
+                "wait_reason", "summary", "history", "events", "strategy_name",
+                "strategy_mode", "mr_ma_n", "mr_entry_z"):
         assert key in snap
     assert snap["lookback"] == 48
-    assert "Momentum" in snap["strategy_name"]
 
 
 def test_snapshot_has_connector_fields():
@@ -476,3 +477,185 @@ def test_engine_uses_sandbox_when_mode(monkeypatch):
     spec.code = "SRU6"
     eng = TradingEngine(cfg, spec)
     assert type(eng.executor).__name__ == "St5SandboxExecutor"
+
+
+# ============================ mean-reversion (z-score) ============================
+
+from pairsignal.st5.indicators import ZScoreIndicator
+from pairsignal.st5.strategy import (
+    entry_signal_mr, exit_signal_mr, in_session_window,
+)
+
+
+def _mr_cfg(ma_n=5, entry_z=2.0, exit_z=0.5, stop_z=4.0, max_hold=10):
+    cfg = St5Config()
+    cfg.strategy.strategy_mode = "meanrev"
+    cfg.strategy.mr_ma_n = ma_n
+    cfg.strategy.mr_entry_z = entry_z
+    cfg.strategy.mr_exit_z = exit_z
+    cfg.strategy.mr_stop_z = stop_z
+    cfg.strategy.mr_max_hold = max_hold
+    cfg.strategy.flat_at_session_end = False
+    # широкое окно сессии, чтобы тестовые бары (10:00+) попадали
+    cfg.strategy.session_lo_min = 0
+    cfg.strategy.session_hi_min = 1440
+    return cfg
+
+
+def test_zscore_not_ready_below_ma_n():
+    """is_ready только когда накоплено ≥ ma_n баров и std>0."""
+    z = ZScoreIndicator(ma_n=4)
+    for c in (100, 101, 102):
+        assert not z.update(c).is_ready
+    assert z.update(103).is_ready          # 4-й бар → готов
+
+
+def test_zscore_flat_not_ready():
+    """Плоский участок (std=0) → не готов (вырожденный z)."""
+    z = ZScoreIndicator(ma_n=3)
+    z.update(100); z.update(100)
+    assert not z.update(100).is_ready
+
+
+def test_zscore_no_repaint_matches_pandas():
+    """z боевого индикатора == pandas rolling(ma_n).std(ddof=0) на тех же закрытых барах."""
+    import numpy as np
+    import pandas as pd
+    closes = [100, 102, 98, 105, 95, 110, 90, 103, 99, 101, 104, 97]
+    ma_n = 5
+    s = pd.Series(closes, dtype=float)
+    ma = s.rolling(ma_n, min_periods=ma_n).mean()
+    sd = s.rolling(ma_n, min_periods=ma_n).std(ddof=0)
+    zi = ZScoreIndicator(ma_n=ma_n)
+    for i, c in enumerate(closes):
+        r = zi.update(float(c))
+        if i + 1 < ma_n or sd.iloc[i] == 0:
+            continue
+        expected = (closes[i] - ma.iloc[i]) / sd.iloc[i]
+        assert r.is_ready
+        assert r.z == pytest.approx(expected, abs=1e-9)
+
+
+def _zr(z, ready=True):
+    from pairsignal.st5.models import ZScoreReading
+    return ZScoreReading(ts=0, price=100.0, sma=100.0, std=1.0, z=z, is_ready=ready)
+
+
+def test_mr_entry_signal_by_z():
+    cfg = _mr_cfg(entry_z=2.5, stop_z=4.0).strategy
+    assert entry_signal_mr(_zr(-3.0), cfg) == Signal.BUY     # ниже −entry_z
+    assert entry_signal_mr(_zr(3.0), cfg) == Signal.SELL     # выше +entry_z
+    assert entry_signal_mr(_zr(-1.0), cfg) == Signal.NONE    # внутри полосы
+    assert entry_signal_mr(_zr(-5.0), cfg) == Signal.NONE    # за стопом → не входим
+    assert entry_signal_mr(_zr(-3.0, ready=False), cfg) == Signal.NONE
+
+
+def test_mr_exit_tp_stop_time():
+    cfg = _mr_cfg(exit_z=0.5, stop_z=4.0, max_hold=10).strategy
+    long_pos = _pos(BotState.LONG, 100.0)
+    # TP: z вернулся к −exit_z (≥ −0.5)
+    assert exit_signal_mr(long_pos, -0.4, 1, cfg) == (True, "take")
+    # стоп: z ушёл глубже −stop_z
+    assert exit_signal_mr(long_pos, -4.5, 1, cfg) == (True, "stop")
+    # держим: z всё ещё в зоне
+    assert exit_signal_mr(long_pos, -2.0, 1, cfg) == (False, "")
+    # время
+    assert exit_signal_mr(long_pos, -2.0, 10, cfg) == (True, "time_stop")
+    short_pos = _pos(BotState.SHORT, 100.0)
+    assert exit_signal_mr(short_pos, 0.3, 1, cfg) == (True, "take")
+    assert exit_signal_mr(short_pos, 4.2, 1, cfg) == (True, "stop")
+
+
+def test_in_session_window():
+    cfg = St5Config()
+    cfg.strategy.session_lo_min = 600    # 10:00
+    cfg.strategy.session_hi_min = 1125   # 18:45
+    s, ses = cfg.strategy, cfg.session
+    assert in_session_window(_ts("2026-06-10", 12, 0), s, ses)
+    assert not in_session_window(_ts("2026-06-10", 9, 30), s, ses)   # до открытия
+    assert not in_session_window(_ts("2026-06-10", 19, 0), s, ses)   # вечерняя — вне окна
+
+
+def _feed_mr(eng, ts0, closes, iv=600_000):
+    last = None
+    for i, c in enumerate(closes):
+        last = eng.step(_bar(ts0 + i * iv, c))
+    return last
+
+
+def test_mr_engine_long_entry_on_low_z_and_tp_exit():
+    """meanrev: глубокое отрицательное z → LONG; возврат к среднему → выход TP."""
+    eng = TradingEngine(_mr_cfg(ma_n=5, entry_z=1.5, exit_z=0.5, stop_z=4.0, max_hold=50), _spec())
+    ts0 = _ts("2026-06-10", 11, 0)
+    # 5 баров около 100 (прогрев), затем резкий провал → z << 0 → LONG
+    _feed_mr(eng, ts0, [100, 100, 101, 99, 100])
+    eng.step(_bar(ts0 + 5 * 600_000, 88))     # сильное отклонение вниз → LONG
+    assert eng.state == BotState.LONG
+    assert eng.position.side == "buy"
+    # возврат к среднему → z к 0 → выход TP
+    for i in range(6, 30):
+        eng.step(_bar(ts0 + i * 600_000, 100))
+        if eng.state == BotState.FLAT:
+            break
+    assert len(eng.trades) == 1
+    assert eng.trades[0].reason in ("take", "time_stop")
+
+
+def test_mr_engine_short_entry_on_high_z():
+    eng = TradingEngine(_mr_cfg(ma_n=5, entry_z=1.5), _spec())
+    ts0 = _ts("2026-06-10", 11, 0)
+    _feed_mr(eng, ts0, [100, 100, 101, 99, 100])
+    eng.step(_bar(ts0 + 5 * 600_000, 115))    # сильное отклонение вверх → SHORT
+    assert eng.state == BotState.SHORT
+    assert eng.position.side == "sell"
+
+
+def test_mr_session_window_blocks_entry():
+    """Сигнал вне окна основной сессии → вход не открывается."""
+    cfg = _mr_cfg(ma_n=5, entry_z=1.5)
+    cfg.strategy.session_lo_min = 600     # 10:00
+    cfg.strategy.session_hi_min = 1125    # 18:45
+    eng = TradingEngine(cfg, _spec())
+    ts0 = _ts("2026-06-10", 20, 0)        # 20:00 — вечерняя, вне окна
+    _feed_mr(eng, ts0, [100, 100, 101, 99, 100])
+    res = eng.step(_bar(ts0 + 5 * 600_000, 88))
+    assert eng.state == BotState.FLAT
+    assert any("окна основной сессии" in e.message for e in res.events)
+
+
+def test_mr_no_lookahead_first_signal_only_after_warmup():
+    """Сигнал не появляется раньше, чем накоплено ma_n баров (no look-ahead)."""
+    eng = TradingEngine(_mr_cfg(ma_n=8, entry_z=0.5), _spec())
+    ts0 = _ts("2026-06-10", 11, 0)
+    # первые 7 баров: индикатор не готов → позиция не открывается даже при отклонении
+    for i, c in enumerate([100, 130, 70, 120, 80, 110, 90]):
+        eng.step(_bar(ts0 + i * 600_000, c))
+        assert eng.state == BotState.FLAT
+
+
+def test_mr_snapshot_fields():
+    """snapshot в meanrev отдаёт cur_z и strategy_name='meanrev', прежние поля на месте."""
+    s = St5Session("sber")           # дефолт meanrev
+    snap = s.snapshot(0.0)
+    assert snap["strategy_mode"] == "meanrev"
+    assert snap["strategy_name"] == "meanrev"
+    assert "cur_z" in snap
+    assert snap["mr_ma_n"] == 36 and snap["mr_entry_z"] == 2.5
+    # прежний контракт фронта /st5/state не сломан
+    for key in ("fsm_state", "position", "pending", "summary", "history",
+                "trades", "wait_reason", "cur_signal", "leg"):
+        assert key in snap
+
+
+def test_mr_session_defaults_meanrev_and_backtest_runs():
+    """SBER-сессия по умолчанию meanrev; backtest боевого кода в meanrev исполняет сделки."""
+    from pairsignal.st5.backtest import run_backtest, vwap_frame_for_chart
+    s = St5Session("sber")
+    assert s.cfg.strategy.strategy_mode == "meanrev"
+    cfg = _mr_cfg(ma_n=12, entry_z=1.0, exit_z=0.5, stop_z=4.0, max_hold=20)
+    df = feed.generate_synthetic(n=800)
+    r = run_backtest(df, cfg, feed.synthetic_spec())
+    assert r["bars"] == 800
+    assert r["trades"] >= 1
+    frame = vwap_frame_for_chart(df, cfg)
+    assert frame and "z" in frame[0]

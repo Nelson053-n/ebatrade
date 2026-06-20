@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from .config import St5Config
-from .indicators import MomentumIndicator, VolumeAverage
+from .indicators import MomentumIndicator, VolumeAverage, ZScoreIndicator
 from .models import (
     BotState,
     EngineEvent,
@@ -24,8 +24,17 @@ from .models import (
     PriceBar,
     Signal,
     Trade,
+    ZScoreReading,
 )
-from .strategy import entry_signal, exit_signal, in_clearing_window, is_session_end
+from .strategy import (
+    entry_signal,
+    entry_signal_mr,
+    exit_signal,
+    exit_signal_mr,
+    in_clearing_window,
+    in_session_window,
+    is_session_end,
+)
 
 
 @dataclass
@@ -107,7 +116,12 @@ class TradingEngine:
     def __init__(self, cfg: St5Config, spec: InstrumentSpec) -> None:
         self.cfg = cfg
         self.spec = spec
-        self.momentum = MomentumIndicator(cfg.strategy.lookback)
+        self.mode = cfg.strategy.strategy_mode
+        # один из индикаторов по режиму (другой None — не гоняем лишнего).
+        self.momentum = (MomentumIndicator(cfg.strategy.lookback)
+                         if self.mode == "momentum" else None)
+        self.zscore = (ZScoreIndicator(cfg.strategy.mr_ma_n)
+                       if self.mode == "meanrev" else None)
         self.volavg = VolumeAverage()
         # выбор исполнителя: paper (executor=None → встроенный paper-филл, поведение без
         # изменений) или sandbox T-Bank. Sandbox-импорт локальный, чтобы paper-режим и
@@ -126,6 +140,7 @@ class TradingEngine:
         self._bars_held = 0
         self._pending: Optional[tuple[Signal, MomentumReading]] = None
         self.last_reading: Optional[MomentumReading] = None
+        self.last_z: Optional[ZScoreReading] = None      # meanrev: последний z-срез
         self._last_bar: Optional[PriceBar] = None
         self._last_vol_avg = float("nan")
         self._armed = True
@@ -150,9 +165,12 @@ class TradingEngine:
         return out
 
     def warmup(self, bars: list[PriceBar]) -> None:
-        """Прогрев momentum-буфера историей (без сигналов): прокручиваем индикатор."""
+        """Прогрев буфера индикатора историей (без сигналов): прокручиваем индикатор."""
         for b in bars:
-            self.momentum.update(b.close)
+            if self.momentum is not None:
+                self.momentum.update(b.close)
+            if self.zscore is not None:
+                self.zscore.update(b.close)
             self.volavg.update(b.ts, b.volume)
 
     def days_to_expiry(self, ts_ms: int) -> Optional[int]:
@@ -168,10 +186,16 @@ class TradingEngine:
     # ---------- основной шаг FSM ----------
     def step(self, bar: PriceBar) -> StepResult:
         self._last_bar = bar
-        reading = self.momentum.update(bar.close)
-        reading.ts = bar.ts
+        if self.mode == "meanrev":
+            zr = self.zscore.update(bar.close)
+            zr.ts = bar.ts
+            self.last_z = zr
+            reading = None
+        else:
+            reading = self.momentum.update(bar.close)
+            reading.ts = bar.ts
+            self.last_reading = reading
         self._last_vol_avg = self.volavg.update(bar.ts, bar.volume)
-        self.last_reading = reading
         events: list[EngineEvent] = []
 
         if self.state == BotState.HALTED:
@@ -181,7 +205,10 @@ class TradingEngine:
             self._bars_held += 1
 
         # ---- принудительное закрытие к концу сессии (овернайт-риск) ----
-        if (self.position is not None and self.cfg.strategy.flat_at_session_end
+        # meanrev держит позицию до z/time-выхода (research не форсит EOD: вход уже ограничен
+        # окном основной сессии, max_hold ограничивает удержание) — EOD-flat только в momentum.
+        if (self.position is not None and self.mode != "meanrev"
+                and self.cfg.strategy.flat_at_session_end
                 and is_session_end(bar.ts, self.cfg.session)):
             trade = self._auto_close(bar, "eod", events)
             if trade is not None:
@@ -212,23 +239,41 @@ class TradingEngine:
             return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                               trade=trade, events=events)
 
-        # ---- управление открытой позицией (выход — авто): holding / стоп ----
+        # ---- управление открытой позицией (выход — авто): TP/стоп/время ----
         if self.position is not None:
-            should_exit, reason = exit_signal(
-                self.position, self._bars_held, bar.close,
-                self.cfg.strategy.holding, self.cfg.strategy.stop_pct)
+            if self.mode == "meanrev":
+                z_ready = self.last_z is not None and self.last_z.is_ready
+                # z недоступен (вырожденный std) — держим до следующего готового бара/времени
+                z_val = self.last_z.z if z_ready else float("nan")
+                if z_ready:
+                    should_exit, reason = exit_signal_mr(
+                        self.position, z_val, self._bars_held, self.cfg.strategy)
+                elif (self.cfg.strategy.mr_max_hold > 0
+                      and self._bars_held >= self.cfg.strategy.mr_max_hold):
+                    should_exit, reason = True, "time_stop"
+                else:
+                    should_exit, reason = False, ""
+            else:
+                should_exit, reason = exit_signal(
+                    self.position, self._bars_held, bar.close,
+                    self.cfg.strategy.holding, self.cfg.strategy.stop_pct)
             if should_exit:
                 trade = self._auto_close(bar, reason, events)
                 if trade is not None:
-                    label = "стоп" if reason == "stop" else "holding"
+                    label = {"stop": "стоп", "take": "TP"}.get(reason, "holding")
                     events.append(EngineEvent(bar.ts, "exit",
                                   f"выход ({label}): net {trade.net_pnl_rub:+.0f}₽", {}))
                 return StepResult(state=self.state, reading=reading, signal=Signal.EXIT,
                                   trade=trade, events=events)
 
         # ---- поиск входа ----
-        if self.position is None and self._armed and reading.is_ready:
-            sig = entry_signal(reading)
+        _ind_ready = (self.last_z.is_ready if self.mode == "meanrev"
+                      else (reading is not None and reading.is_ready))
+        if self.position is None and self._armed and _ind_ready:
+            if self.mode == "meanrev":
+                sig = entry_signal_mr(self.last_z, self.cfg.strategy)
+            else:
+                sig = entry_signal(reading)
             if sig != Signal.NONE:
                 d2e = self.days_to_expiry(bar.ts)
                 no_entry = self.cfg.instrument.rollover_no_new_entry_days_before
@@ -236,6 +281,10 @@ class TradingEngine:
                 if d2e is not None and d2e < no_entry:
                     events.append(EngineEvent(bar.ts, "warn",
                                   f"сигнал пропущен: до экспирации {d2e} дн (< {no_entry})", {}))
+                elif (self.mode == "meanrev"
+                      and not in_session_window(bar.ts, self.cfg.strategy, self.cfg.session)):
+                    events.append(EngineEvent(bar.ts, "warn",
+                                  "вне окна основной сессии — пропуск входа", {}))
                 elif in_clearing_window(exec_ts, self.cfg.session):
                     events.append(EngineEvent(bar.ts, "warn", "сигнал в клиринге — пропуск", {}))
                 elif self.cfg.strategy.flat_at_session_end and is_session_end(exec_ts, self.cfg.session):
@@ -355,16 +404,21 @@ class TradingEngine:
         self.balance_rub -= fee
         self.risk.on_success()
         new_state = BotState.LONG if sig == Signal.BUY else BotState.SHORT
-        # entry_vwap (имя поля персиста) = close[-lookback] на входе — база momentum
-        ref = reading.ref_price if not math.isnan(reading.ref_price) else fill
+        # entry_vwap (имя поля персиста): momentum — close[-lookback]; meanrev — SMA на входе.
+        if self.mode == "meanrev":
+            ref = (self.last_z.sma if (self.last_z and not math.isnan(self.last_z.sma))
+                   else fill)
+            detail = f"z {self.last_z.z:+.2f}" if (self.last_z and self.last_z.is_ready) else "z —"
+        else:
+            ref = reading.ref_price if not math.isnan(reading.ref_price) else fill
+            detail = f"momentum {reading.lookback_return * 100:+.2f}%"
         self.position = Position(state=new_state, side=side, lots=lots, entry_price=fill,
                                  entry_ts=bar.ts, entry_vwap=ref, entry_fee_rub=fee)
         self._entry_slip = slip
         self.state = new_state
         self._bars_held = 0
         events.append(EngineEvent(bar.ts, "position",
-                      f"вход {new_state.value}: {side} @ {fill:.0f} "
-                      f"(momentum {reading.lookback_return * 100:+.2f}%)", {}))
+                      f"вход {new_state.value}: {side} @ {fill:.0f} ({detail})", {}))
         return StepResult(state=self.state, reading=reading, signal=sig, events=events)
 
     def _close_position(self, bar: PriceBar, reason: str) -> Trade:

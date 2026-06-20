@@ -26,10 +26,12 @@ EVENTS_LEN = 40
 BT_HISTORY_LEN = 60
 
 # инструменты, доступные как независимые сессии st5 (?inst=).
-# ключ — id в API, значение — (ASSETCODE, ярлык). Новый инструмент = одна строка.
-ST5_INSTRUMENTS: dict[str, tuple[str, str]] = {
-    "sber": ("SBRF", "Сбербанк"),
-    "gazp": ("GAZR", "Газпром"),
+# ключ — id в API, значение — (ASSETCODE, ярлык, strategy_mode). Новый инструмент = одна строка.
+# meanrev по умолчанию для SBER (устойчивый OOS-эдж, Sharpe ~1.5) и GAZP (paper-наблюдение,
+# OOS breakeven под издержками — держим в meanrev для накопления статистики).
+ST5_INSTRUMENTS: dict[str, tuple[str, str, str]] = {
+    "sber": ("SBRF", "Сбербанк", "meanrev"),
+    "gazp": ("GAZR", "Газпром", "meanrev"),
 }
 
 
@@ -80,10 +82,11 @@ class St5Session:
         if inst not in ST5_INSTRUMENTS:
             raise ValueError(f"неизвестный инструмент st5: {inst}")
         self.inst = inst
-        asset, self.inst_label = ST5_INSTRUMENTS[inst]
+        asset, self.inst_label, mode = ST5_INSTRUMENTS[inst]
         self._session_file = _BASE / f"session_state_5_{inst}.json"
         self.cfg = St5Config()
         self.cfg.instrument.asset = asset
+        self.cfg.strategy.strategy_mode = mode
         self.spec: InstrumentSpec = feed.synthetic_spec()
         self.engine = TradingEngine(self.cfg, self.spec)
         self.state = {"live": False, "player": False, "session_started": None,
@@ -209,6 +212,21 @@ class St5Session:
         self.state["last_event"] = message
 
     def push_history(self, ts: int) -> None:
+        if self.engine.mode == "meanrev":
+            zr = self.engine.last_z
+            if zr is None or not zr.is_ready:
+                return
+            if any(v is None or (isinstance(v, float) and math.isnan(v))
+                   for v in (zr.price, zr.sma, zr.z)):
+                return
+            # для графика meanrev: close + SMA-база + z (метка направления — знак z)
+            self.history.append({"ts": ts, "price": round(zr.price, 1),
+                                 "ref_price": round(zr.sma, 1),
+                                 "signal": (-1 if zr.z > 0 else (1 if zr.z < 0 else 0)),
+                                 "z": round(zr.z, 3)})
+            if len(self.history) > HISTORY_LEN:
+                del self.history[0]
+            return
         r = self.engine.last_reading
         if r is None or not r.is_ready:
             return
@@ -223,9 +241,11 @@ class St5Session:
             del self.history[0]
 
     def warmup_limit(self) -> int:
-        # momentum смотрит на lookback баров назад — берём с запасом (lookback + 3 дня)
+        # индикатор смотрит на N баров назад — берём с запасом (N + 3 дня)
         bpd = int(14 * 60 / self.cfg.strategy.candle_interval_minutes)
-        return self.cfg.strategy.lookback + bpd * 3 + 20
+        n = (self.cfg.strategy.mr_ma_n if self.cfg.strategy.strategy_mode == "meanrev"
+             else self.cfg.strategy.lookback)
+        return n + bpd * 3 + 20
 
     # ---------- персист ----------
     def save_session(self) -> None:
@@ -462,39 +482,70 @@ class St5Session:
     def snapshot(self, server_started: float) -> dict:
         eng = self.engine
         s = self.cfg.strategy
+        meanrev = s.strategy_mode == "meanrev"
+        hold_max = s.mr_max_hold if meanrev else s.holding
         pos = None
         if eng.position is not None:
             p = eng.position
             pos = {"state": p.state.value, "entry_ts": p.entry_ts,
                    "side": p.side, "lots": p.lots,
                    "entry_price": round(p.entry_price, 0),
-                   "entry_ref": round(p.entry_vwap, 0),   # close[-lookback] на входе
+                   "entry_ref": round(p.entry_vwap, 0),   # momentum: close[-lookback]; meanrev: SMA
                    "unrealized_rub": round(eng.unrealized_rub(), 0),
-                   "bars_held": eng._bars_held, "holding": s.holding}
+                   "bars_held": eng._bars_held, "holding": hold_max}
         pending = None
         if eng._pending is not None:
             sig, r = eng._pending
-            pending = {"signal": sig.value, "price": round(r.price, 1),
-                       "ref_price": round(r.ref_price, 1)}
+            pending = {"signal": sig.value}
+            if r is not None:   # momentum-режим несёт MomentumReading; meanrev — None
+                pending.update({"price": round(r.price, 1),
+                                "ref_price": round(r.ref_price, 1)})
+            elif eng.last_z is not None and eng.last_z.is_ready:
+                pending.update({"price": round(eng.last_z.price, 1),
+                                "ref_price": round(eng.last_z.sma, 1)})
 
         last_bar_ts = self.last_live_ts or (self.history[-1]["ts"] if self.history else 0)
         lag_min = round((time.time() - last_bar_ts / 1000) / 60) if last_bar_ts else None
-        r = eng.last_reading
-        cur_signal = r.signal if (r and r.is_ready) else 0
-        lookback_return = (round(r.lookback_return * 100, 3)
-                           if (r and r.is_ready) else None)
+
+        if meanrev:
+            zr = eng.last_z
+            z_ready = bool(zr and zr.is_ready)
+            cur_z = round(zr.z, 3) if z_ready else None
+            # cur_signal: +1 если z в зоне лонга (ниже −entry_z), −1 если зоне шорта, иначе 0
+            if z_ready and zr.z <= -s.mr_entry_z:
+                cur_signal = 1
+            elif z_ready and zr.z >= s.mr_entry_z:
+                cur_signal = -1
+            else:
+                cur_signal = 0
+            lookback_return = None
+            ind_ready = z_ready
+        else:
+            r = eng.last_reading
+            ind_ready = bool(r and r.is_ready)
+            cur_signal = r.signal if ind_ready else 0
+            lookback_return = round(r.lookback_return * 100, 3) if ind_ready else None
+            cur_z = None
         _dir = {1: "вверх (LONG)", -1: "вниз (SHORT)", 0: "флэт"}.get(cur_signal, "—")
 
         if eng.risk.halted:
             wait = "HALTED — нужен ручной разбор"
         elif eng.position is not None:
-            wait = f"в позиции — держим {eng._bars_held}/{s.holding} баров (стоп {s.stop_pct * 100:g}%)"
+            if meanrev:
+                wait = (f"в позиции — держим {eng._bars_held}/{hold_max} баров "
+                        f"(TP |z|≤{s.mr_exit_z:g}, стоп |z|≥{s.mr_stop_z:g})")
+            else:
+                wait = f"в позиции — держим {eng._bars_held}/{hold_max} баров (стоп {s.stop_pct * 100:g}%)"
         elif not (self.state["live"] or self.state["player"]):
             wait = "остановлено"
-        elif r is None or not r.is_ready:
-            wait = f"прогрев momentum (нужно >{s.lookback} баров)"
+        elif not ind_ready:
+            need = s.mr_ma_n if meanrev else s.lookback
+            label = "z-score" if meanrev else "momentum"
+            wait = f"прогрев {label} (нужно ≥{need} баров)"
         elif self.state["data_source"] == "live" and lag_min is not None and lag_min > 25:
             wait = f"ждём свежий бар — MOEX ISS ({lag_min} мин лаг)"
+        elif meanrev:
+            wait = f"ждём отклонение |z|≥{s.mr_entry_z:g}: z={cur_z:+.2f} → {_dir}"
         else:
             wait = f"ждём вход по тренду: momentum {lookback_return:+.2f}% → {_dir}"
 
@@ -525,9 +576,18 @@ class St5Session:
             "asset": self.cfg.instrument.asset,
             "leg": {"code": self.spec.code, "expiry": self.spec.expiry},
             "interval_min": self.cfg.strategy.candle_interval_minutes,
+            "strategy_mode": s.strategy_mode,
             "lookback": s.lookback,
             "holding": s.holding,
             "stop_pct": s.stop_pct,
+            # параметры meanrev (фронт/вкладка читает при strategy_mode=="meanrev")
+            "mr_ma_n": s.mr_ma_n,
+            "mr_entry_z": s.mr_entry_z,
+            "mr_exit_z": s.mr_exit_z,
+            "mr_stop_z": s.mr_stop_z,
+            "mr_max_hold": s.mr_max_hold,
+            "session_lo_min": s.session_lo_min,
+            "session_hi_min": s.session_hi_min,
             "flat_at_session_end": s.flat_at_session_end,
             "pending": pending, "position": pos,
             "summary": eng.summary(),
@@ -538,11 +598,12 @@ class St5Session:
             "wait_reason": wait,
             "data_lag_min": lag_min,
             "last_bar_ts": last_bar_ts or None,
-            "warmup_done": bool(r and r.is_ready),
+            "warmup_done": ind_ready,
             "trade_start_ts": self.state.get("trade_start_ts"),
             "cur_signal": cur_signal,
             "lookback_return": lookback_return,
-            "cur_z": None,   # DEPRECATED (VWAP) — оставлено, чтобы старый лог snapshot.py не падал
-            "strategy_name": "Momentum %s · lb%d/h%d" % (
-                self.cfg.instrument.asset, s.lookback, s.holding),
+            "cur_z": cur_z,
+            "strategy_name": ("meanrev" if meanrev else
+                              "Momentum %s · lb%d/h%d" % (
+                                  self.cfg.instrument.asset, s.lookback, s.holding)),
         })

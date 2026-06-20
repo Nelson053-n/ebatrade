@@ -181,6 +181,30 @@ class PairStat:
     score: float
 
 
+def compute_pair_stat(prices_a: Sequence[float], prices_b: Sequence[float],
+                      ta: str, tb: str, p: Params) -> PairStat | None:
+    """Статистика фиксированной пары (corr/β/ADF-p/half-life) БЕЗ отбора из корзины.
+
+    Используется боевым сервисом для snapshot.pair_stat на захардкоженной паре —
+    rank_pairs не вызывается. None, если данных мало или β непригодна.
+    """
+    a = np.asarray(prices_a, dtype=float)
+    b = np.asarray(prices_b, dtype=float)
+    n = min(len(a), len(b))
+    if n <= p.beta_window:
+        return None
+    a, b = a[-n:], b[-n:]
+    corr = rolling_correlation(a, b, p.corr_window)
+    beta, _ = hedge_ratio(np.log(a[-p.beta_window:]), np.log(b[-p.beta_window:]))
+    if not np.isfinite(corr) or beta <= 0:
+        return None
+    spr = spread_series(a[-p.beta_window:], b[-p.beta_window:], beta)
+    pval = adf_pvalue(spr)
+    hl = half_life(spr)
+    score = abs(corr) * (1.0 - pval) * (1.0 / math.log1p(hl)) if np.isfinite(hl) and hl > 0 else 0.0
+    return PairStat(ta, tb, corr, beta, pval, hl, score)
+
+
 def rank_pairs(series_by_ticker: dict[str, Sequence[float]],
                p: Params) -> list[PairStat]:
     """

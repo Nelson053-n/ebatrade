@@ -68,6 +68,22 @@ class MomentumReading:
 
 
 @dataclass(slots=True)
+class ZScoreReading:
+    """Срез mean-reversion на закрытый бар: z-score отклонения close от SMA(ma_n).
+
+    z = (close − sma) / std по последним ma_n закрытым барам (no repaint). signal: +1
+    (z ≤ −entry_z, ждём возврата вверх → LONG), −1 (z ≥ +entry_z → SHORT), 0 иначе —
+    знак заполняет стратегия. is_ready — накоплено ≥ ma_n закрытых баров и std > 0.
+    """
+    ts: int
+    price: float               # close текущего бара
+    sma: float                 # SMA(close, ma_n); nan пока не готов
+    std: float                 # std(close, ma_n); nan пока не готов
+    z: float                   # z-score; nan пока не готов
+    is_ready: bool
+
+
+@dataclass(slots=True)
 class VwapReading:
     """DEPRECATED (VWAP-reversion). Оставлен для совместимости старых импортов/тестов."""
     ts: int

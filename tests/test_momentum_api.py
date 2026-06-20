@@ -16,7 +16,7 @@ def test_state_no_file(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_MOM_STATE", tmp_path / "nope.json")
     r = client.get("/momentum/state")
     assert r.status_code == 200
-    assert r.json() == {"running": False}
+    assert r.json()["running"] is False
 
 
 def test_state_reads_portfolio(monkeypatch, tmp_path):
@@ -47,7 +47,7 @@ def test_state_handles_corrupt_file(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_MOM_STATE", bad)
     r = client.get("/momentum/state")
     assert r.status_code == 200
-    assert r.json() == {"running": False}
+    assert r.json()["running"] is False
 
 
 def test_st1_st2_not_broken():
@@ -56,6 +56,71 @@ def test_st1_st2_not_broken():
     assert client.get("/state?slot=2").status_code == 200
     # дашборд содержит вкладку st3
     assert 'data-slot="3"' in client.get("/").text
+
+
+def test_default_slots_are_benchmark():
+    """Дефолт слотов st1/st2 — benchmark: MR-ядро отключено (entry_z недостижим)."""
+    for slot in (1, 2):
+        s = client.get(f"/state?slot={slot}").json()
+        assert s["preset"] == "benchmark"
+        assert s["benchmark"] is True
+        assert "отключён" in s["strategy_name"]
+
+
+def test_state_snapshot_contract_intact():
+    """Бенчмарк не ломает контракт snapshot: все читаемые фронтом поля на месте."""
+    s = client.get("/state?slot=1").json()
+    for key in ("live", "player", "auto_approve", "preset", "pair", "position",
+                "summary", "history", "trades", "last", "timeframe"):
+        assert key in s, f"поле {key} пропало из snapshot"
+
+
+def test_benchmark_slot_opens_no_trades():
+    """Бенчмарк-слот не открывает сделок: 2000 синтетических баров → 0 сделок."""
+    from pairsignal import api as _api
+    st = _api.SLOTS[0]
+    st._apply_preset("benchmark")
+    st.reset_engine()
+    summ = client.post("/replay/synthetic?limit=2000&slot=1").json()
+    assert summ["trades"] == 0
+    assert len(st.engine.exch.trades) == 0
+
+
+def test_prod_momentum_params_fixed():
+    """Прод-параметры momentum зафиксированы по research: top-25, 1h, lb168/h24/k3 L/S."""
+    from pairsignal.api import PROD_MOMENTUM
+    assert PROD_MOMENTUM["top"] == 25
+    assert PROD_MOMENTUM["timeframe"] == "1h"
+    assert PROD_MOMENTUM["lookback"] == 168
+    assert PROD_MOMENTUM["holding"] == 24
+    assert PROD_MOMENTUM["k"] == 3
+    assert PROD_MOMENTUM["long_short"] is True
+    assert PROD_MOMENTUM["fee"] == 0.0006
+    assert PROD_MOMENTUM["slippage"] == 0.0002
+
+
+def test_momentum_state_exposes_prod_config(monkeypatch, tmp_path):
+    """Без live-файла /momentum/state отдаёт зафиксированный прод-конфиг для UI."""
+    monkeypatch.setattr(api, "_MOM_STATE", tmp_path / "nope.json")
+    d = client.get("/momentum/state").json()
+    assert d["running"] is False
+    assert d["prod"]["lookback"] == 168 and d["prod"]["top"] == 25
+
+
+def test_old_session_files_load(tmp_path):
+    """Старые session_state_1/2.json грузятся без ошибок (контракт persist цел)."""
+    from pathlib import Path
+
+    from pairsignal.api import SlotState
+    base = Path(__file__).resolve().parent.parent
+    for idx in (0, 1):
+        f = base / f"session_state_{idx + 1}.json"
+        if not f.exists():
+            continue
+        st = SlotState(idx, "benchmark")
+        assert st.load_session() is True
+        # восстановленные сделки/баланс сохранены (старые сессии не теряются)
+        assert isinstance(st.engine.exch.trades, list)
 
 
 def test_momentum_endpoints_registered():

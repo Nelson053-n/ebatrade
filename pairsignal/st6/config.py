@@ -1,11 +1,18 @@
-"""Конфигурация st6 (Correlation-Gated Pairs) — pydantic v2, без хардкода.
+"""Конфигурация st6 (часовой парный mean-reversion обычка/преф) — pydantic v2.
 
-Парный mean-reversion с корреляционным гейтом и динамическим отбором пары из
-корзины акций MOEX. Данные — дневные свечи MOEX ISS (рынок акций), paper-only
-(Phase 1, реальные ордера не отправляются). Params ядра (st6.core.Params)
-продублирован здесь как pydantic-модель StrategyConfig, чтобы конфиг сериализовался
-в session_state_6.json и редактировался из API; в ядро он переносится через
-to_params().
+Часовой парный mean-reversion для ДВУХ фиксированных пар обычка/преф одного
+эмитента: TATN/TATNP и SBER/SBERP — единственный доказанный OOS-эдж на MOEX
+(research/moex/pairs_h1_RESULTS.txt). Динамический отбор пары из корзины (rank_pairs)
+ОТКЛЮЧЁН: честный walk-forward на корзине давал t≤1.15 (data snooping). Пара
+ФИКСИРУЕТСЯ.
+
+⚠ ЧЕСТНОСТЬ: эдж подтверждён ТОЛЬКО под maker/limit-исполнением (~0.01% fee + 0.01%
+slip на ногу, ~6.4 bps round-trip). Под taker (0.05%+0.03%) эдж съедается (t~1.0).
+Часовой ТФ (interval=60), НЕ дневной. Это форвард-тест гипотезы, не гарантия прибыли.
+
+Данные — часовые свечи MOEX ISS (рынок акций), paper-only (Phase 1). Params ядра
+(st6.core.Params) продублирован здесь как StrategyConfig для сериализации в
+session_state_6.json; переносится в ядро через to_params().
 """
 from __future__ import annotations
 
@@ -15,52 +22,59 @@ from pydantic import BaseModel, Field
 
 from .core import Params
 
-# Ликвидные коррелированные акции MOEX (нефтегаз / металлурги / SBER).
-# Сканер сам выберет лучшую пару — корзину можно расширять/сужать.
-DEFAULT_BASKET: list[str] = [
-    # нефть и газ
-    "LKOH", "ROSN", "SIBN", "TATN", "GAZP", "NVTK",
-    # металлурги
-    "GMKN", "NLMK", "MAGN", "CHMF",
-    # банки / голубые фишки
-    "SBER",
-]
+# Корзина оставлена для совместимости (старые session-файлы, snapshot.basket), но
+# для ОТБОРА не используется — пара фиксирована. Содержит обе ноги фикс-пар.
+DEFAULT_BASKET: list[str] = ["TATN", "TATNP", "SBER", "SBERP"]
+
+# Фиксированные пары обычка/преф с пара-специфичным z_exit (доказано research):
+# TATN/TATNP лучший на zx=1.0 (maker t=4.37, Sh=1.85); SBER/SBERP на zx=0.5 (t=2.35).
+# Активная пара по умолчанию — TATN/TATNP (сильнейший эдж). Вторая доступна сменой
+# fixed_pair через /st6/config. Отбора (rank_pairs) больше нет.
+FIXED_PAIRS: dict[str, dict] = {
+    "TATN/TATNP": {"a": "TATN", "b": "TATNP", "z_exit": 1.0},
+    "SBER/SBERP": {"a": "SBER", "b": "SBERP", "z_exit": 0.5},
+}
+DEFAULT_PAIR = "TATN/TATNP"
 
 
 class StrategyConfig(BaseModel):
-    """Параметры ядра st6 (зеркало core.Params для сериализации/редактирования)."""
-    # окна
-    beta_window: int = 240            # бар для оценки β (OLS) и средней спреда
-    z_window: int = 240               # окно z-score
-    corr_window: int = 120            # окно скользящей корреляции лог-доходностей
+    """Параметры ядра st6 (зеркало core.Params для сериализации/редактирования).
+
+    Дефолты = конфиг research для часового парного MR обычка/преф под MAKER:
+    окна β/z=480ч, corr=240ч, z_entry=2.0, z_exit=1.0 (TATN; SBER переопределяет на
+    0.5 через FIXED_PAIRS), издержки maker 0.0001/0.0001.
+    """
+    # окна (часовые бары)
+    beta_window: int = 480            # бар для оценки β (OLS) и средней спреда
+    z_window: int = 480               # окно z-score
+    corr_window: int = 240            # окно скользящей корреляции лог-доходностей
     # пороги входа/выхода по z
     z_entry: float = 2.0
-    z_exit: float = 0.3
+    z_exit: float = 1.0               # пара-специфичен (FIXED_PAIRS), это дефолт TATN
     z_stop: float = 3.5
-    # корреляционный гейт. Калибровано под реальные дневные данные акций MOEX: на горизонте
-    # ~2 года |corr| родственных бумаг ~0.55-0.65 (не 0.8 как на синтетике/внутри дня) —
-    # иначе годной пары нет вовсе (бэктест 600 баров: при 0.6 находится SIBN/NVTK corr0.62 p0.06).
+    # корреляционный гейт (мягкий — на фикс-парах corr ~0.90, не мешает; страховка от слома)
     corr_enter: float = 0.58          # вход разрешён только если |corr| >= этого
     corr_break: float = 0.45          # если |corr| падает ниже — аварийный выход
-    # отбор пары (скан корзины)
+    # отбор пары (legacy-поля, НЕ используются — пара фиксирована; оставлены для совместимости)
     select_min_corr: float = 0.60
     select_max_pvalue: float = 0.20   # ADF p-value для коинтеграции спреда
-    select_max_halflife: float = 400.0
+    select_max_halflife: float = 720.0
     # риск/сайзинг
     risk_fraction: float = 0.02       # доля equity на нотионал каждой ноги
     time_stop_bars: int = 0           # 0 = выкл; иначе принудительный выход по барам
-    # издержки (на оборот, доля от нотионала ноги)
-    fee_rate: float = 0.0006
-    slippage_rate: float = 0.0005
+    # издержки maker/limit (на оборот, доля от нотионала ноги). ⚠ эдж жив только под этими;
+    # taker (0.0005/0.0003) убивает эдж — см. модуль-docstring.
+    fee_rate: float = 0.0001
+    slippage_rate: float = 0.0001
 
-    def to_params(self) -> Params:
-        """Перенести конфиг в датакласс ядра."""
+    def to_params(self, z_exit: float | None = None) -> Params:
+        """Перенести конфиг в датакласс ядра. z_exit можно переопределить пара-специфично."""
         return Params(
             beta_window=self.beta_window,
             z_window=self.z_window,
             corr_window=self.corr_window,
             z_entry=self.z_entry,
-            z_exit=self.z_exit,
+            z_exit=self.z_exit if z_exit is None else z_exit,
             z_stop=self.z_stop,
             corr_enter=self.corr_enter,
             corr_break=self.corr_break,
@@ -89,16 +103,35 @@ class ConnectorConfig(BaseModel):
 
 
 class St6Config(BaseModel):
-    """Полный конфиг сессии st6."""
+    """Полный конфиг сессии st6.
+
+    Все НОВЫЕ поля строго С ДЕФОЛТАМИ: St6Config(**cfg) грузит старые
+    session_state_6_*.json целиком (service.load_session ~стр 461) — без дефолта
+    загрузка упадёт.
+    """
     basket: list[str] = Field(default_factory=lambda: list(DEFAULT_BASKET))
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
-    # таймфрейм свечей. '1d' — дневные (глубокая история, дефолт), '1h' — часовые.
-    timeframe: str = "1d"
-    history_days: int = 720           # сколько дней истории тянуть с MOEX ISS
-    reselect_every_bars: int = 20     # как часто пере-выбирать лучшую пару (вне позиции)
+    # активная ФИКСИРОВАННАЯ пара (ключ FIXED_PAIRS). Отбора из корзины больше нет.
+    fixed_pair: str = DEFAULT_PAIR
+    # таймфрейм свечей. '1h' — часовые (доказанный эдж); '1d' — дневные (legacy).
+    timeframe: str = "1h"
+    # часовых баров нужно: warmup max(480,480,240)+5 ≈ 485 + торговля. ~15 баров/торг.день
+    # → 365 дней ≈ 5500 часовых баров (с запасом на выходные/прогрев).
+    history_days: int = 365           # сколько дней истории тянуть с MOEX ISS
+    reselect_every_bars: int = 20     # legacy (отбора нет) — оставлено для совместимости
     start_equity_rub: float = 1_000_000.0
-    poll_seconds: int = 1800          # период опроса ISS в live (дневной ТФ — редко)
+    poll_seconds: int = 600           # период опроса ISS в live (часовой ТФ — раз в ~час)
     # коннектор: paper (дефолт) или tbank_sandbox. Структурный (ранее был строкой "paper" —
     # legacy-строка из старых session-файлов конвертируется в service.load_session).
     connector: ConnectorConfig = Field(default_factory=ConnectorConfig)
     auto_approve: bool = True         # вход без ручного подтверждения (как st5)
+
+    def pair_tickers(self) -> tuple[str, str]:
+        """Тикеры активной фикс-пары (a, b). Падает обратно на DEFAULT_PAIR."""
+        spec = FIXED_PAIRS.get(self.fixed_pair) or FIXED_PAIRS[DEFAULT_PAIR]
+        return spec["a"], spec["b"]
+
+    def pair_z_exit(self) -> float:
+        """Пара-специфичный z_exit активной фикс-пары (TATN=1.0, SBER=0.5)."""
+        spec = FIXED_PAIRS.get(self.fixed_pair) or FIXED_PAIRS[DEFAULT_PAIR]
+        return float(spec["z_exit"])

@@ -176,18 +176,108 @@ def test_st6_session_creates_and_snapshots():
     assert snap["summary"]["trades"] == 0
 
 
-def test_st6_session_player_trades_on_synthetic():
-    """Прогон синтетики через FSM сессии: выбирает пару, делает paper-сделки."""
+def _synthetic_fixed_pair_basket(n=1500, seed=7):
+    """Синтетическая коинт-пара под именами активной фикс-пары (TATN/TATNP) +
+    шумовой тикер. Фикс-пара торгуется именно по своим тикерам."""
+    from pairsignal.st6.config import St6Config
+    a, b = make_synthetic_pair(n=n, seed=seed)
+    ta, tb = St6Config().pair_tickers()
+    rng = np.random.default_rng(seed + 1)
+    noise = np.exp(np.cumsum(rng.normal(0, 0.012, n)) + 4)
+    return {ta: list(a), tb: list(b), "NOISE": list(noise)}
+
+
+def test_st6_session_player_trades_on_fixed_pair():
+    """Прогон синтетики через FSM сессии на ФИКС-паре: paper-сделки идут, rank_pairs НЕ вызывается."""
     import asyncio
-    from pairsignal.st6 import data_feed as feed
+    from unittest import mock
     from pairsignal.st6.service import St6Session
     s = St6Session("test_player")
-    s.player_closes = feed.synthetic_basket(n=1200, seed=7)
+    s.player_closes = _synthetic_fixed_pair_basket(n=1500, seed=7)
     s.state["player"] = True
-    asyncio.run(s.run_player())
+    # rank_pairs не должен вызываться — отбор отключён, пара фиксирована
+    with mock.patch("pairsignal.st6.core.rank_pairs",
+                    side_effect=AssertionError("rank_pairs must not be called")):
+        asyncio.run(s.run_player())
     snap = s.snapshot(0.0)
-    assert snap["pair"] is not None, "должна выбраться коинтегрированная пара"
+    assert snap["pair"] == list(s.cfg.pair_tickers()), snap["pair"]
+    assert snap["fixed_pair"] == s.cfg.fixed_pair
     assert snap["summary"]["trades"] > 0, "синтетика должна дать сделки"
+
+
+def test_st6_fixed_pair_no_rank_pairs_import_in_service():
+    """В боевом сервисе отбор из корзины отключён: select_pair НЕ зовёт rank_pairs."""
+    from unittest import mock
+    from pairsignal.st6.service import St6Session
+    s = St6Session("test")
+    ta, tb = s.cfg.pair_tickers()
+    a, b = make_synthetic_pair(n=900, seed=4)
+    s.closes = {ta: list(a), tb: list(b)}
+    with mock.patch("pairsignal.st6.core.rank_pairs",
+                    side_effect=AssertionError("rank_pairs must not be called")):
+        assert s.select_pair() is True
+    assert s.pair == (ta, tb)
+    assert s.pair_stat is not None and {s.pair_stat.a, s.pair_stat.b} == {ta, tb}
+
+
+def test_st6_snapshot_has_honest_maker_note():
+    """Snapshot отдаёт честную пометку про maker-эдж и режим издержек."""
+    from pairsignal.st6.service import St6Session
+    s = St6Session("test")
+    snap = s.snapshot(0.0)
+    assert "edge_note" in snap and "maker" in snap["edge_note"].lower()
+    assert snap["cost_mode"] == "maker"  # дефолтные издержки maker
+    # contract: фикс-поля на месте
+    for k in ("pair", "pair_stat", "cur_z", "cur_corr", "cur_beta", "params",
+              "position", "summary", "history", "trades", "wait_reason"):
+        assert k in snap, k
+
+
+def test_st6_pair_specific_z_exit():
+    """z_exit пара-специфичен: TATN/TATNP=1.0, SBER/SBERP=0.5."""
+    from pairsignal.st6.config import St6Config
+    c = St6Config(fixed_pair="TATN/TATNP")
+    assert c.pair_z_exit() == 1.0
+    assert c.strategy.to_params(z_exit=c.pair_z_exit()).z_exit == 1.0
+    c2 = St6Config(fixed_pair="SBER/SBERP")
+    assert c2.pair_z_exit() == 0.5
+    assert c2.pair_tickers() == ("SBER", "SBERP")
+    assert c2.strategy.to_params(z_exit=c2.pair_z_exit()).z_exit == 0.5
+
+
+def test_st6_maker_costs_default():
+    """Дефолтные издержки — maker (0.0001/0.0001), не taker."""
+    from pairsignal.st6.config import St6Config
+    p = St6Config().strategy.to_params()
+    assert p.fee_rate == 0.0001 and p.slippage_rate == 0.0001
+    assert (p.fee_rate + p.slippage_rate) <= 0.0002  # maker-порог
+
+
+def test_st6_old_session_state_loads(tmp_path, monkeypatch):
+    """Старый session_state_6_*.json (без fixed_pair, timeframe=1d) грузится без падения."""
+    import json
+    from pairsignal.st6 import service as svc
+    from pairsignal.st6.service import St6Session
+    old = {
+        "session_started": 1.0,
+        "config": {"basket": ["LKOH", "ROSN"], "strategy": {"beta_window": 240,
+                   "z_window": 240, "corr_window": 120, "z_exit": 0.3,
+                   "fee_rate": 0.0006, "slippage_rate": 0.0005},
+                   "timeframe": "1d", "history_days": 720, "connector": "paper"},
+        "equity": 1_000_000.0, "trades": [], "position": None, "open_ctx": None,
+        "pair": None, "pair_stat": None, "cur": {"z": None, "corr": None, "beta": None},
+        "history": [], "bars_since_select": 0, "last_live_ts": 0, "live": False,
+        "data_source": "synthetic", "paused_by_user": False,
+    }
+    monkeypatch.setattr(svc, "_BASE", tmp_path)
+    (tmp_path / "session_state_6_legacy.json").write_text(json.dumps(old))
+    s = St6Session("legacy")
+    assert s.load_session() is True
+    # legacy stored config сохранён (timeframe=1d), fixed_pair дефолтнулся
+    assert s.cfg.timeframe == "1d"
+    assert s.cfg.fixed_pair == "TATN/TATNP"
+    snap = s.snapshot(0.0)
+    assert snap["summary"]["trades"] == 0
 
 
 # ----------------------------------------------------- sandbox-исполнитель (мок)

@@ -26,6 +26,11 @@ pairsignal/st4/.tbank_token
 # результаты прогонов и live-состояние momentum (рантайм-артефакты)
 pairsignal/out/
 
+# кэши рыночных данных research (тяжёлые, перекачиваются скриптами)
+pairsignal/research/*/cache/
+pairsignal/research/**/out/
+pairsignal/research/**/*.pkl
+
 # служебные файлы Claude
 .claude/
 /st6/

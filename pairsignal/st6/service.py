@@ -24,7 +24,7 @@ from . import data_feed as feed
 from .config import St6Config
 from .core import (
     PairStat, Position, Side,
-    decide, leg_quantities, rank_pairs, trade_pnl,
+    compute_pair_stat, decide, leg_quantities, trade_pnl,
 )
 from .models import EngineEvent, PairTrade
 
@@ -146,7 +146,8 @@ class St6Session:
 
     @property
     def params(self):
-        return self.cfg.strategy.to_params()
+        # z_exit пара-специфичен (TATN=1.0, SBER=0.5) — берём из активной фикс-пары
+        return self.cfg.strategy.to_params(z_exit=self.cfg.pair_z_exit())
 
     def warmup_limit(self) -> int:
         p = self.params
@@ -169,35 +170,42 @@ class St6Session:
         if len(self.history) > HISTORY_LEN:
             del self.history[0]
 
-    # ---------- отбор пары ----------
+    # ---------- фиксированная пара (отбор rank_pairs ОТКЛЮЧЁН) ----------
     def select_pair(self) -> bool:
-        """Через rank_pairs выбрать лучшую пару корзины. True — пара выбрана/сменилась."""
-        ranked = rank_pairs(self.closes, self.params)
-        if not ranked:
-            return False
-        best = ranked[0]
-        new = (best.a, best.b)
+        """Установить АКТИВНУЮ ФИКС-пару (из cfg.fixed_pair) и пересчитать её статистику.
+
+        Динамический отбор из корзины (rank_pairs) убран: честный walk-forward на
+        корзине давал t≤1.15 (data snooping). Пара захардкожена; здесь лишь освежаем
+        pair_stat (corr/β/ADF-p/hl) для UI по текущим закрытиям. True — пара установлена.
+        """
+        ta, tb = self.cfg.pair_tickers()
+        new = (ta, tb)
         changed = new != self.pair
-        self.pair, self.pair_stat = new, best
+        self.pair = new
+        a, b = self.closes.get(ta), self.closes.get(tb)
+        if a and b:
+            self.pair_stat = compute_pair_stat(a, b, ta, tb, self.params)
         self.bars_since_select = 0
         if changed:
-            self.log_event("select", f"выбрана пара {best.a}/{best.b} "
-                           f"(corr {best.corr:+.2f}, p={best.pvalue:.3f}, "
-                           f"hl={best.halflife:.0f})")
+            self.log_event("info", f"активная фикс-пара {ta}/{tb} "
+                           f"(z_exit={self.cfg.pair_z_exit():g})")
         return True
 
     def _maybe_reselect(self) -> None:
-        """Пере-выбор пары вне позиции по таймеру reselect_every_bars.
+        """Раньше — пере-выбор лучшей пары по таймеру. Теперь пара фиксирована: только
+        гарантируем, что активная пара установлена (и при необходимости освежаем stat).
 
-        В sandbox при СМЕНЕ пары пересоздаём исполнитель на новые тикеры (позиции нет —
-        _maybe_reselect срабатывает только вне позиции, так что закрывать нечего)."""
-        if self.port.position.is_open:
-            return
-        if self.pair is None or self.bars_since_select >= self.cfg.reselect_every_bars:
+        В sandbox при СМЕНЕ пары (оператор сменил fixed_pair) пересоздаём исполнитель."""
+        ta, tb = self.cfg.pair_tickers()
+        if self.pair != (ta, tb):
+            if self.port.position.is_open:
+                return  # пара не меняется на лету при открытой позиции
             before = self.pair
             self.select_pair()
             if self.state.get("sandbox_active") and self.pair and self.pair != before:
                 self._ensure_executor(rebuild=True)
+        elif self.pair_stat is None:
+            self.select_pair()
 
     # ---------- sandbox: исполнитель пары ----------
     def _lot_sizes(self) -> tuple[int, int]:
@@ -251,6 +259,9 @@ class St6Session:
             self.pair = None
             return
         p = self.params
+        # фикс-пара: периодически освежаем статистику пары для UI (corr/β/ADF-p/hl)
+        if self.pair_stat is None or self.bars_since_select % 24 == 0:
+            self.pair_stat = compute_pair_stat(a, b, ta, tb, p)
         pos = self.port.position
         sig = decide(a, b, pos, p)
         self.cur = {"z": sig.z, "corr": sig.corr, "beta": sig.beta}
@@ -499,8 +510,9 @@ class St6Session:
         if self.cfg.connector.mode == "tbank_sandbox":
             await asyncio.to_thread(self.activate_sandbox)
         mode_lbl = "T-Bank sandbox" if self.state.get("sandbox_active") else "paper"
-        self.log_event("info", f"live запущен ({mode_lbl}, MOEX ISS): корзина "
-                       f"{len(self.cfg.basket)} тикеров, прогрев…")
+        ta, tb = self.cfg.pair_tickers()
+        self.log_event("info", f"live запущен ({mode_lbl}, MOEX ISS, ТФ {self.cfg.timeframe}): "
+                       f"фикс-пара {ta}/{tb}, прогрев…")
         first = True
         while self.state["live"]:
             try:
@@ -616,7 +628,8 @@ class St6Session:
             "paused_by_user": self.state["paused_by_user"],
             "basket": self.cfg.basket,
             "timeframe": self.cfg.timeframe,
-            "pair": list(self.pair) if self.pair else None,
+            "fixed_pair": self.cfg.fixed_pair,
+            "pair": list(self.pair) if self.pair else list(self.cfg.pair_tickers()),
             "pair_stat": pair_info,
             "cur_z": round(z, 3) if isinstance(z, (int, float)) and math.isfinite(z) else None,
             "cur_corr": round(corr, 3) if isinstance(corr, (int, float)) and math.isfinite(corr) else None,
@@ -625,7 +638,8 @@ class St6Session:
             "params": {"z_entry": p.z_entry, "z_exit": p.z_exit, "z_stop": p.z_stop,
                        "corr_enter": p.corr_enter, "corr_break": p.corr_break,
                        "beta_window": p.beta_window, "z_window": p.z_window,
-                       "corr_window": p.corr_window, "risk_fraction": p.risk_fraction},
+                       "corr_window": p.corr_window, "risk_fraction": p.risk_fraction,
+                       "fee_rate": p.fee_rate, "slippage_rate": p.slippage_rate},
             "position": position,
             "summary": self.port.summary(),
             "history": self.history,
@@ -635,6 +649,15 @@ class St6Session:
             "wait_reason": wait,
             "warmup_done": n_have > self.warmup_limit(),
             "bars_have": n_have,
-            "strategy_name": "Correlation-Gated Pairs · корзина %d · ТФ %s" % (
-                len(self.cfg.basket), self.cfg.timeframe),
+            # издержки: maker, если fee+slip на ногу ≤ ~0.0002 (research-порог жизни эджа)
+            "cost_mode": "maker" if (p.fee_rate + p.slippage_rate) <= 0.0002 else "taker",
+            # ⚠ ЧЕСТНАЯ ПОМЕТКА: эдж подтверждён ТОЛЬКО под maker/limit-исполнением.
+            "edge_note": ("Эдж подтверждён OOS ТОЛЬКО под limit/maker-исполнением "
+                          "(~0.01% fee + 0.01% slip на ногу): TATN/TATNP t=4.37, Sharpe 1.85; "
+                          "SBER/SBERP t=2.35, Sharpe 1.02. Под taker (0.05%+0.03%) эдж "
+                          "съедается (t~1.0). Филл limit-ордера НЕ гарантирован — это "
+                          "форвард-тест гипотезы, не гарантия прибыли."),
+            "strategy_name": "Часовой парный MR обычка/преф · %s · ТФ %s · %s" % (
+                self.cfg.fixed_pair, self.cfg.timeframe,
+                "maker" if (p.fee_rate + p.slippage_rate) <= 0.0002 else "taker"),
         })

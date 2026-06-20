@@ -1,0 +1,39 @@
+=== Часовой парный MR на MOEX. BARS_PER_YEAR=3780, train=3780ч test=945ч ===
+
+--- A. GROSS vs NET (фикс-пары, w=480/240, ze=2.0 zx=0.5) ---
+    pair         GROSS bps/t  GROSS t | NET bps/t   NET t  NET ret%
+    TATN/TATNP          36.0     3.99 |       3.3    0.37    +0.18%
+    SBER/SBERP          35.1     3.05 |       2.8    0.24    +0.20%
+    NLMK/CHMF            1.4     0.07 |     -29.2   -1.46    -1.13%
+    MAGN/CHMF           47.1     1.40 |      15.4    0.45    +0.43%
+    NLMK/MAGN           19.7     0.82 |      -7.7   -0.32    -0.21%
+    LKOH/ROSN           38.2     0.80 |       8.0    0.17    +0.32%
+    ROSN/SIBN           58.9     0.81 |      26.0    0.36    +0.33%
+    SIBN/TATN          106.4     1.16 |      76.6    0.84    +0.53%
+
+--- B. NET по выходу z_exit (фикс-пары, ze=2.0, taker) ---
+  TATN/TATNP:
+    zx=0.3 tr= 237 ret=  -0.13% win=  45% DD=  0.6% Sh_ann=-0.09 Sh_tr=-0.29 t=-0.29 bps=  -2.8 LOO+=0.00
+    zx=0.5 tr= 262 ret=  +0.18% win=  50% DD=  0.7% Sh_ann=+0.17 Sh_tr=+0.37 t=+0.37 bps=  +3.3 LOO+=1.00
+    zx=1.0 tr= 317 ret=  +0.47% win=  55% DD=  0.6% Sh_ann=+0.45 Sh_tr=+1.03 t=+1.03 bps=  +7.5 LOO+=1.00
+    zx=1.5 tr= 393 ret=  -0.32% win=  49% DD=  0.6% Sh_ann=-0.36 Sh_tr=-0.84 t=-0.84 bps=  -4.2 LOO+=0.00
+  SBER/SBERP:
+    zx=0.3 tr= 333 ret=  +0.15% win=  32% DD=  0.8% Sh_ann=+0.08 Sh_tr=+0.18 t=+0.18 bps=  +2.2 LOO+=1.00
+    zx=0.5 tr= 361 ret=  +0.20% win=  32% DD=  0.8% Sh_ann=+0.11 Sh_tr=+0.24 t=+0.24 bps=  +2.8 LOO+=1.00
+    zx=1.0 tr= 415 ret=  -0.11% win=  27% DD=  1.0% Sh_ann=-0.06 Sh_tr=-0.14 t=-0.14 bps=  -1.4 LOO+=0.00
+    zx=1.5 tr= 503 ret=  -0.48% win=  24% DD=  1.4% Sh_ann=-0.25 Sh_tr=-0.59 t=-0.59 bps=  -4.8 LOO+=0.00
+  NLMK/CHMF:
+    zx=0.3 tr= 185 ret=  -0.91% win=  38% DD=  1.5% Sh_ann=-0.48 Sh_tr=-1.19 t=-1.19 bps= -24.6 LOO+=0.00
+    zx=0.5 tr= 194 ret=  -1.13% win=  40% DD=  1.7% Sh_ann=-0.60 Sh_tr=-1.46 t=-1.46 bps= -29.2 LOO+=0.00
+    zx=1.0 tr= 211 ret=  -0.96% win=  45% DD=  1.6% Sh_ann=-0.62 Sh_tr=-1.42 t=-1.42 bps= -22.9 LOO+=0.00
+    zx=1.5 tr= 268 ret=  -1.14% win=  54% DD=  1.7% Sh_ann=-0.80 Sh_tr=-1.86 t=-1.85 bps= -21.4 LOO+=0.00
+  MAGN/CHMF:
+    zx=0.3 tr= 130 ret=  +0.27% win=  37% DD=  0.9% Sh_ann=+0.27 Sh_tr=+0.41 t=+0.41 bps= +10.6 LOO+=0.99
+    zx=0.5 tr= 140 ret=  +0.43% win=  39% DD=  0.9% Sh_ann=+0.20 Sh_tr=+0.46 t=+0.45 bps= +15.4 LOO+=0.99
+    zx=1.0 tr= 171 ret=  +0.51% win=  42% DD=  0.8% Sh_ann=+0.24 Sh_tr=+0.56 t=+0.56 bps= +14.9 LOO+=0.99
+    zx=1.5 tr= 195 ret=  +0.25% win=  48% DD=  0.8% Sh_ann=+0.13 Sh_tr=+0.29 t=+0.29 bps=  +6.6 LOO+=0.99
+
+--- C. ЧЕСТНЫЙ OOS walk-forward (отбор на train, торговля на test) ---
+  WF w=240/120 zx=0.5        tr= 338 ret=  -1.15% win=  23% DD=  1.7% Sh_ann=-0.58 Sh_tr=-1.13 t=-1.13 bps= -17.2 LOO+=0.00
+  WF w=240/120 zx=1.0        tr= 407 ret=  -2.07% win=  18% DD=  2.6% Sh_ann=-1.19 Sh_tr=-2.32 t=-2.32 bps= -25.8 LOO+=0.00
+  WF w=480/240 zx=0.5        tr= 235 ret=  -0.00% win=  41% DD=  1.0% Sh_ann=+0.02 Sh_tr=+0.00 t=+0.00 bps=  +0.0 LOO+=0.65
