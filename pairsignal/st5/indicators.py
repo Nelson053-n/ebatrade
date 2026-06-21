@@ -12,7 +12,7 @@ import math
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from .models import MomentumReading, PriceBar, VwapReading
+from .models import MomentumReading, PriceBar, VwapReading, ZScoreReading
 
 _MSK = timezone(timedelta(hours=3))   # сессия FORTS в МСК (день VWAP считаем по ней)
 
@@ -48,6 +48,41 @@ class MomentumIndicator:
         ret = (close - ref) / ref if ref else 0.0
         return MomentumReading(ts=0, price=close, ref_price=ref, signal=signal,
                                lookback_return=ret, is_ready=True)
+
+
+class ZScoreIndicator:
+    """Потоковый mean-reversion z-score: (close[i] − SMA)/std по ma_n закрытым барам.
+
+    Держит кольцевой буфер последних ma_n закрытий. На баре i (когда накоплено ma_n):
+      sma = mean(closes), std = population-std (ddof=0) — как rolling(ma_n).std(ddof=0)
+      в research; z = (close − sma)/std при std > 0.
+    is_ready — буфер заполнен (≥ ma_n баров) И std > 0 (вырожденный плоский участок → не готов).
+    Без дневного сброса: окно скользящее по ma_n барам (no repaint — только закрытые бары).
+    """
+
+    def __init__(self, ma_n: int = 36) -> None:
+        self.ma_n = max(2, int(ma_n))
+        self._closes: deque[float] = deque(maxlen=self.ma_n)
+
+    @property
+    def is_ready(self) -> bool:
+        return len(self._closes) >= self.ma_n
+
+    def update(self, close: float) -> ZScoreReading:
+        """Добавить close закрытого бара, вернуть z-срез (после добавления)."""
+        self._closes.append(close)
+        if len(self._closes) < self.ma_n:
+            return ZScoreReading(ts=0, price=close, sma=float("nan"), std=float("nan"),
+                                 z=float("nan"), is_ready=False)
+        n = len(self._closes)
+        mean = math.fsum(self._closes) / n
+        var = math.fsum((c - mean) ** 2 for c in self._closes) / n   # ddof=0 (population)
+        std = math.sqrt(var)
+        if std <= 0:
+            return ZScoreReading(ts=0, price=close, sma=mean, std=0.0,
+                                 z=float("nan"), is_ready=False)
+        z = (close - mean) / std
+        return ZScoreReading(ts=0, price=close, sma=mean, std=std, z=z, is_ready=True)
 
 
 def _day_key(ts_ms: int) -> str:

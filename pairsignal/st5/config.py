@@ -30,15 +30,33 @@ class InstrumentConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    """Directional momentum: close vs close[-lookback], удержание holding баров."""
+    """Directional momentum ИЛИ intraday mean-reversion (по strategy_mode)."""
     model_config = ConfigDict(extra="ignore")   # незнакомые ключи старых сессий — молча отбросить
 
     candle_interval_minutes: int = 10     # MOEX ISS: 5m нет, дефолт 10m
+
+    # режим стратегии: "momentum" (close vs close[-lookback]) | "meanrev" (z-score откл. от SMA).
+    # Дефолт momentum — чтобы старые session_state_5_*.json грузились без смены поведения;
+    # meanrev включается инструмент-специфично в ST5_INSTRUMENTS (service.py).
+    strategy_mode: Literal["momentum", "meanrev"] = "momentum"
 
     # --- параметры momentum (бэктест lb48/h18: SRU6 +97, GZU6 +420, оба в плюсе) ---
     lookback: int = 48                    # бар сравнения: signal = sign(close[i] − close[i−lookback])
     holding: int = 18                     # держим ровно столько баров, затем выход по времени
     stop_pct: float = 0.02                # ранний выход: цена против позиции > stop_pct (2%)
+
+    # --- параметры mean-reversion (research/forts: SBER OOS Sharpe +1.50, GAZR breakeven) ---
+    # z[i] = (close[i] − SMA(close, mr_ma_n)[i]) / std(close, mr_ma_n)[i] по закрытым барам.
+    # Вход в окне основной сессии MSK: z ≤ −mr_entry_z → LONG; z ≥ +mr_entry_z → SHORT.
+    # Выход: |z| ≤ mr_exit_z (TP) | |z| ≥ mr_stop_z (стоп) | bars_held ≥ mr_max_hold (время).
+    mr_ma_n: int = 36
+    mr_entry_z: float = 2.5
+    mr_exit_z: float = 0.5
+    mr_stop_z: float = 4.0
+    mr_max_hold: int = 36
+    # окно входа основной сессии FORTS в минутах от полуночи MSK [lo; hi) — 10:00–18:45.
+    session_lo_min: int = 600
+    session_hi_min: int = 1125
 
     # принудительное закрытие к концу сессии (овернайт-риск) — сохранено из инфраструктуры
     flat_at_session_end: bool = True

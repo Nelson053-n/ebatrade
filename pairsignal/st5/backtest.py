@@ -12,7 +12,7 @@ import pandas as pd
 
 from .config import St5Config
 from .engine import TradingEngine
-from .indicators import MomentumIndicator
+from .indicators import MomentumIndicator, ZScoreIndicator
 from .models import InstrumentSpec, PriceBar
 
 
@@ -71,10 +71,22 @@ def vwap_frame_for_chart(df: pd.DataFrame, cfg: St5Config) -> list[dict]:
     """Кадр графика вкладки: close + momentum-сигнал по всему df (прогрев → отброшен).
 
     Имя функции сохранено (импортируется в api.py). Поля под momentum: close, ref_price
-    (close[-lookback]), signal (+1/−1/0), lookback_return (%).
+    (close[-lookback]), signal (+1/−1/0), lookback_return (%). Под meanrev: close, ref_price
+    (SMA), signal (знак −z), z.
     """
-    mom = MomentumIndicator(cfg.strategy.lookback)
     out = []
+    if cfg.strategy.strategy_mode == "meanrev":
+        zi = ZScoreIndicator(cfg.strategy.mr_ma_n)
+        for ts, row in df.iterrows():
+            r = zi.update(float(row["close"]))
+            if not r.is_ready:
+                continue
+            out.append({"ts": int(ts), "price": round(r.price, 1),
+                        "ref_price": round(r.sma, 1),
+                        "signal": (-1 if r.z > 0 else (1 if r.z < 0 else 0)),
+                        "z": round(r.z, 3)})
+        return out
+    mom = MomentumIndicator(cfg.strategy.lookback)
     for ts, row in df.iterrows():
         close = float(row["close"])
         r = mom.update(close)

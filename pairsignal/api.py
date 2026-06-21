@@ -66,8 +66,28 @@ PAIRS = [
 # поддерживаемые таймфреймы MEXC → длительность в минутах
 TIMEFRAMES = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240}
 
+# Прод-параметры боевого momentum forward-test (st3). Зафиксированы по research
+# (pairsignal/research/crypto): cross-sectional L/S momentum, OOS Sharpe 1.4–3.0, держит 5×
+# издержки. Юниверс — топ-25 ликвидных перпов (на широком хрупок), 1h, lb168/h24/k3 L/S.
+# Не автоподбор: фиксация надёжнее (research показал, что подбор стабильно оседает на lb168).
+PROD_MOMENTUM = {
+    "top": 25, "timeframe": "1h", "lookback": 168, "holding": 24, "k": 3,
+    "long_short": True, "fee": 0.0006, "slippage": 0.0002,
+}
+
 # пресеты параметров (подобраны grid-search + multi-agent ресёрч, out-of-sample train/test)
 PRESETS = {
+    # ДЕФОЛТ слотов st1/st2: spread mean-reversion на крипте убыточен out-of-sample
+    # (research: −94% OOS). Держим ядро как БЕНЧМАРК — entry_z недостижим (z нормирован,
+    # |z| редко > 5), поэтому слот не открывает сделок, но весь контракт snapshot цел и
+    # MR-логика доступна для /analyze. Рабочая крипто-стратегия — momentum (вкладка st3).
+    "benchmark": {
+        "label": "Бенчмарк (MR отключён)",
+        "desc": "spread mean-reversion убыточен на крипте OOS (−94%) — слот не торгует, "
+                "только эталон. Рабочая стратегия — momentum (st3).",
+        "entry_z": 9.5, "stop_z": 10.0, "profit_target_fees": 6.0,
+        "bb_period": 240, "min_width_pct": 0.5,
+    },
     "balanced": {
         "label": "Сбалансированный",
         "desc": "win 73%, net +91 (6 мес, 9 пар, OOS-подтверждён): ранний тейк + широкий стоп",
@@ -268,8 +288,10 @@ class SlotState:
 
 _server_started = time.time()       # момент запуска процесса (uptime сервера, общий)
 SLOTS = [
-    SlotState(0, "balanced", ("XRP/USDT:USDT", "ADA/USDT:USDT")),
-    SlotState(1, "cross_pct", ("SUI/USDT:USDT", "SUI/USDT:USDT")),
+    # дефолт — benchmark: MR-ядро отключено (убыточно на крипте OOS), слоты не торгуют.
+    # Рабочая крипто-стратегия — momentum (st3). MR-код жив для /analyze и как эталон.
+    SlotState(0, "benchmark", ("XRP/USDT:USDT", "ADA/USDT:USDT")),
+    SlotState(1, "benchmark", ("BTC/USDT:USDT", "ETH/USDT:USDT")),
 ]
 
 
@@ -654,6 +676,11 @@ def state(slot: int = 1):
         "player": st.state["player"],
         "auto_approve": st.cfg.auto_approve,     # режим авто-входа
         "preset": st.current_preset(),           # активный пресет параметров
+        # бенчмарк-режим: MR-ядро отключено (entry_z недостижим) — слот не открывает сделок.
+        # Фронт показывает это явно; рабочая крипто-стратегия — momentum (st3).
+        "benchmark": st.cfg.strategy.entry_z >= 9.0,
+        "strategy_name": ("MR-бенчмарк (отключён)" if st.cfg.strategy.entry_z >= 9.0
+                          else "spread mean-reversion"),
         "session_started": st.state["session_started"],  # unix-сек старта торговой сессии
         "server_started": _server_started,    # unix-сек запуска сервера (uptime)
         "now": time.time(),                   # серверное «сейчас» (для расчёта длительности на клиенте)
@@ -813,7 +840,9 @@ def momentum_state():
 
     loaded = load_state(_MOM_STATE)
     if loaded is None:
-        return {"running": False}
+        # файла нет (forward-test ещё не писал) — отдаём прод-конфиг, чтобы UI показал
+        # зафиксированные параметры боевого прогона, а не пустоту.
+        return {"running": False, "prod": PROD_MOMENTUM}
     port, meta = loaded
     longs = sorted(s for s, w in port.weights.items() if w > 0)
     shorts = sorted(s for s, w in port.weights.items() if w < 0)
@@ -891,8 +920,9 @@ def _run_backtest_mom(top: int, days: int, timeframe: str, k: int,
     if prices.shape[1] < 2 * k or len(prices) < 500:
         return {"error": f"мало данных: {prices.shape[1]} монет, {len(prices)} баров"}
     bph = _BARS_PER_YEAR.get(timeframe, 365 * 24) / 365
+    # сетка включает прод-lookback 168 (research: подбор стабильно оседает на нём) и holding 24
     rows = walk_forward(prices, int(60 * bph), int(30 * bph),
-                        [24, 48, 96, 240], [12, 24, 48], k, True, fee, slippage)
+                        [24, 48, 96, 168, 240], [12, 24, 48], k, True, fee, slippage)
     # склеенная OOS equity
     eq, cum = [], 1.0
     for r in rows:
@@ -908,8 +938,10 @@ def _run_backtest_mom(top: int, days: int, timeframe: str, k: int,
 
 
 @app.get("/momentum/backtest")
-async def momentum_backtest(top: int = 30, days: int = 365, timeframe: str = "1h",
-                            k: int = 3, fee: float = 0.0006, slippage: float = 0.0002):
+async def momentum_backtest(top: int = PROD_MOMENTUM["top"], days: int = 365,
+                            timeframe: str = PROD_MOMENTUM["timeframe"],
+                            k: int = PROD_MOMENTUM["k"], fee: float = PROD_MOMENTUM["fee"],
+                            slippage: float = PROD_MOMENTUM["slippage"]):
     """Walk-forward бэктест на лету. Тяжёлый (загрузка) → to_thread + кэш по параметрам."""
     key = f"bt:{top}:{days}:{timeframe}:{k}:{fee}:{slippage}"
     if key not in _MOM_CACHE:
@@ -1605,8 +1637,8 @@ async def st4_tests():
 @app.get("/st5/instruments")
 def st5_instruments():
     """Список инструментов — фронт строит переключатель динамически."""
-    return {"instruments": [{"id": iid, "asset": a, "label": lbl}
-                            for iid, (a, lbl) in ST5_INSTRUMENTS.items()]}
+    return {"instruments": [{"id": iid, "asset": a, "label": lbl, "strategy_mode": mode}
+                            for iid, (a, lbl, mode) in ST5_INSTRUMENTS.items()]}
 
 
 @app.get("/st5/state")
@@ -1646,6 +1678,18 @@ async def st5_set_config(payload: dict, inst: str = "sber"):
     s.pending_ttl_bars = int(_num("pending_ttl_bars", 1, 100, s.pending_ttl_bars))
     s.volume_filter_mult = _num("volume_filter_mult", 0.0, 10.0, s.volume_filter_mult)
     s.max_data_lag_min = _num("max_data_lag_min", 0.0, 1440.0, s.max_data_lag_min)
+    # --- mean-reversion: режим + параметры z-score (точечно, st6 не затрагиваем) ---
+    if "strategy_mode" in payload and payload["strategy_mode"] is not None:
+        if payload["strategy_mode"] not in ("momentum", "meanrev"):
+            raise HTTPException(400, "strategy_mode: momentum | meanrev")
+        s.strategy_mode = payload["strategy_mode"]
+    s.mr_ma_n = int(_num("mr_ma_n", 2, 1000, s.mr_ma_n))
+    s.mr_entry_z = _num("mr_entry_z", 0.1, 10.0, s.mr_entry_z)
+    s.mr_exit_z = _num("mr_exit_z", 0.0, 10.0, s.mr_exit_z)
+    s.mr_stop_z = _num("mr_stop_z", 0.1, 20.0, s.mr_stop_z)
+    s.mr_max_hold = int(_num("mr_max_hold", 0, 100000, s.mr_max_hold))
+    s.session_lo_min = int(_num("session_lo_min", 0, 1440, s.session_lo_min))
+    s.session_hi_min = int(_num("session_hi_min", 0, 1440, s.session_hi_min))
     if "entry_trigger" in payload:
         if payload["entry_trigger"] not in ("Breakout", "ReEntry"):
             raise HTTPException(400, "entry_trigger: Breakout | ReEntry")
@@ -1983,6 +2027,11 @@ def st6_set_config(payload: dict):
     for k, v in strat.items():
         if hasattr(s.cfg.strategy, k):
             setattr(s.cfg.strategy, k, v)
+    # fixed_pair: смена активной фикс-пары (TATN/TATNP | SBER/SBERP). Только из FIXED_PAIRS.
+    if "fixed_pair" in payload:
+        from .st6.config import FIXED_PAIRS
+        if payload["fixed_pair"] in FIXED_PAIRS:
+            s.cfg.fixed_pair = payload["fixed_pair"]
     for k in ("basket", "timeframe"):
         if k in payload:
             setattr(s.cfg, k, payload[k])

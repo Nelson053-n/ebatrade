@@ -263,7 +263,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
   <!-- ST3: momentum (cross-sectional) — отдельная панель, скрыта по умолчанию -->
   <div id="st3panel" style="display:none">
     <div class="panel fade" style="margin-bottom:14px">
-      <h2>st3 · Cross-Sectional Momentum <em>long-only + рыночный фильтр</em></h2>
+      <h2>st3 · Cross-Sectional Momentum <em>рабочая крипто-стратегия · long/short, top-25, lb168/h24/k3</em></h2>
       <div style="font-size:13px;line-height:1.75;color:var(--ink-dim)">
         <p style="margin:0 0 8px"><b style="color:var(--ink)">Идея.</b> В отличие от st1/st2 (mean-reversion — ставка на <i>возврат</i> спреда к среднему), momentum ставит на <i>продолжение</i> относительного тренда. Крипта исторически трендова — это другой класс edge.</p>
         <p style="margin:0 0 8px"><b style="color:var(--ink)">Механика.</b> Каждые <code>holding</code> часов ранжируем топ-30 ликвидных монет по доходности за прошлые <code>lookback</code> закрытых баров и лонгуем <code>k</code> лидеров равным нотионалом. <b>Только лонг</b> — шорты убраны: бэктест показал, что short-нога теряет на растущей крипте (long +2928% / short −80% за 180д) и раздувает просадку.</p>
@@ -769,6 +769,11 @@ tr:hover td{background:rgba(255,255,255,.015)}
 
   <!-- ПАРНЫЙ LAYOUT st1/st2 (график, аналитика, журнал, параметры) — прячется на st3/st4/st5 -->
   <div id="pairlayout">
+  <!-- баннер бенчмарк-режима: MR-ядро отключено по умолчанию (убыточно на крипте OOS) -->
+  <div id="bench-banner" class="panel fade" style="display:none;margin-bottom:14px;border-left:3px solid var(--warn)">
+    <b style="color:var(--warn)">Бенчмарк-режим — слот не торгует.</b>
+    <span style="color:var(--ink-dim);font-size:13px">Spread mean-reversion на крипте убыточен out-of-sample (research: −94%). Ядро оставлено как эталон и для анализа; новых сделок слот не открывает. Рабочая крипто-стратегия — <b>momentum</b> (вкладка st3).</span>
+  </div>
   <div class="grid">
     <!-- LEFT: chart + indicators -->
     <div>
@@ -1287,6 +1292,9 @@ function render(s){
   pBtn.textContent='пресет: '+(pcur?pcur.label:'свой');
   pBtn.title=pcur?pcur.desc:'параметры изменены вручную';
 
+  // бенчмарк-режим (MR отключён): показываем баннер
+  const bb=$('bench-banner'); if(bb) bb.style.display = s.benchmark ? '' : 'none';
+
   // кнопка паузы потока актуальна только для синтетики
   $('btnPause').style.display = s.live ? 'none' : '';
 
@@ -1732,7 +1740,13 @@ let _momTimer=null;
 async function momState(){
   try{
     const s=await fetch(API+'/momentum/state').then(r=>r.json());
-    if(!s.running && !s.equity){ $('m-live-status').textContent='не запущен'; return; }
+    if(!s.running && !s.equity){
+      $('m-live-status').textContent='не запущен';
+      // forward-test ещё не писал состояние — показываем зафиксированный прод-конфиг
+      const pr=s.prod; if(pr) $('m-params').textContent=
+        `прод-конфиг: top-${pr.top} ${pr.timeframe} · lookback=${pr.lookback} holding=${pr.holding} k=${pr.k} · long/short`;
+      return;
+    }
     $('m-live-status').textContent = s.running ? '🟢 активен' : '⚪ остановлен';
     $('m-equity').textContent = '$'+(s.equity??0).toFixed(2);
     const ret=s.return_pct??0;
